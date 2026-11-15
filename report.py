@@ -98,9 +98,17 @@ def render_card(game:dict)->bytes:
     txt(45,30,'PLAYCHL  /  OFFICIAL MATCH REPORT',27,blue,True)
     txt(45,77,f"GAME {game['id']}  ·  {game.get('date','Date unavailable')}  ·  {game['status'].upper()}",19,muted)
     box((35,120,W-35,275))
-    txt(90,151,a['name'],49,white,True)
-    txt(W//2,160,f"{a['score']}  :  {h['score']}",66,gold,True,'mt')
-    txt(W-90,151,h['name'],49,white,True,'ra')
+    # Keep team names and score in separate fixed-width zones to prevent overlap.
+    txt(245,143,'AWAY',16,muted,True,'mt')
+    txt(955,143,'HOME',16,muted,True,'mt')
+    def centered_fit(cx,top,value,max_width=330,size=34,fill=white,bold=True):
+        chosen=size
+        while chosen>20 and d.textbbox((0,0),str(value),font=font(chosen,bold))[2]>max_width:
+            chosen-=1
+        d.text((cx,top),str(value),font=font(chosen,bold),fill=fill,anchor='mt')
+    centered_fit(245,178,a['name'],330,34)
+    centered_fit(955,178,h['name'],330,34)
+    centered_fit(W//2,164,f"{a['score']}  –  {h['score']}",260,60,gold,True)
     txt(45,300,'THREE STARS OF THE GAME',27,gold,True)
     if stars:
         for i,p in enumerate(stars):
