@@ -138,7 +138,7 @@ def report_embed(game):
     if game.get('source_url'):
         u=str(game['source_url'])
         if urlparse(u).scheme in ('https','http'):em.url=u
-    em.set_footer(text='Graphic and full player-stat CSV ZIP attached to this match report.')
+    em.set_footer(text='Official PlayCHL match report.')
     return em
 
 
@@ -158,9 +158,6 @@ async def publish(game,force=False):
         ch=bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
         safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
         files=[discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")]
-        zip_bytes=build_boxscore_zip(game)
-        if zip_bytes:
-            files.append(discord.File(io.BytesIO(zip_bytes),filename=f"boxstats_{safe_id}.zip"))
         msg=await ch.send(embed=report_embed(game),files=files)
         with db() as c:
             c.execute('UPDATE reports SET posted_at=?,message_id=?,channel_id=? WHERE id=?',(datetime.now(timezone.utc).isoformat(),str(msg.id),str(ch.id),str(game['id'])))
@@ -230,8 +227,6 @@ async def matchreport(interaction:discord.Interaction,game_id:str):
     if not is_target_game(game):return await interaction.followup.send(f'This bot is configured for {TARGET_TEAM_NAME} games only.',ephemeral=True)
     safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
     files=[discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")]
-    zip_bytes=build_boxscore_zip(game)
-    if zip_bytes:files.append(discord.File(io.BytesIO(zip_bytes),filename=f"boxstats_{safe_id}.zip"))
     await interaction.followup.send(embed=report_embed(game),files=files,ephemeral=True)
 
 @bot.tree.command(name='latestreport',description='Show the most recently saved Washington Capitals match report without a game ID')
