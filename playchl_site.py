@@ -26,16 +26,16 @@ def intval(v):
     except (ValueError, TypeError): return 0
 
 def clean_name(s):
-    s = re.sub(r"^\\s*\\d{1,3}\\.\\d\\s*", "", str(s or ""))
+    s = re.sub(r"^\s*\d{1,3}\.\d\s*", "", str(s or ""))
     return s.strip()
 
 def parse_snapshot(snap, game_id):
     """Normalize text/tables into existing report JSON. Fail closed on incomplete results."""
     text = snap["text"]
-    if not re.search(r"\\bFINAL(?:\\s*/\\s*(?:OT|SO))?\\b", text, re.I): return None
-    if re.search(r"\\bFORFEIT\\b", text, re.I): return None
+    if not re.search(r"\bFINAL(?:\s*/\s*(?:OT|SO))?\b", text, re.I): return None
+    if re.search(r"\bFORFEIT\b", text, re.I): return None
     # Site lists two full team names followed by their season records and a score.
-    m = re.search(r"([A-Za-z .'-]+)\\n\\d+-\\d+-\\d+\\n(\\d+)\\nFINAL(?:\\s*/\\s*(OT|SO))?[^\\n]*\\n(\\d+)\\n([A-Za-z .'-]+)\\n\\d+-\\d+-\\d+", text, re.I)
+    m = re.search(r"([A-Za-z .'-]+)\n\d+-\d+-\d+\n(\d+)\nFINAL(?:\s*/\s*(OT|SO))?[^\n]*\n(\d+)\n([A-Za-z .'-]+)\n\d+-\d+-\d+", text, re.I)
     if not m:
         LOG.warning("No verified header for game %s", game_id)
         return None
@@ -70,13 +70,13 @@ def parse_snapshot(snap, game_id):
                     except ValueError: pass
                 else: player[key]=intval(value)
             # Player score is shown inside the first cell; preserved if present.
-            score_match=re.match(r"\\s*(\\d{1,3}\\.\\d)",row[0])
+            score_match=re.match(r"\s*(\d{1,3}\.\d)",row[0])
             if score_match:player["player_score"]=float(score_match.group(1))
             game["players"].append(player)
     # Section text makes the official 3-star names/positions available.
     stars=[]
     for i in (1,2,3):
-        pattern=rf"{i}(?:st|nd|rd) Star\\s+([^\\n]+)\\n([^\\n]+)\\n([^\\n]+)\\n([\\d.]+)\\s*Player Score"
+        pattern=rf"{i}(?:st|nd|rd) Star\s+([^\n]+)\n([^\n]+)\n([^\n]+)\n([\d.]+)\s*Player Score"
         match=re.search(pattern,text,re.I)
         if match:
             name,pos,line,score=match.groups()
@@ -88,7 +88,7 @@ def parse_snapshot(snap, game_id):
         LOG.warning("Incomplete game %s: players=%s stars=%s",game_id,len(game["players"]),len(stars))
         return None
     # Match Stats is often a non-table two-column section.
-    sm = re.search(r"Match Stats\\n(.*?)(?:EA Sports API Results|(?:[A-Za-z ]+ Skaters))",text,re.I|re.S)
+    sm = re.search(r"Match Stats\n(.*?)(?:EA Sports API Results|(?:[A-Za-z ]+ Skaters))",text,re.I|re.S)
     if sm:
         lines=[x.strip() for x in sm.group(1).splitlines() if x.strip()]
         for i,line in enumerate(lines):
@@ -110,7 +110,7 @@ const tables=[...document.querySelectorAll('table')].map(t=>{
    let node=t.parentElement;
    for(let i=0;i<5&&node;i++,node=node.parentElement){
      const s=(node.innerText||'').slice(0,200);
-     const m=s.match(/([^\\n]+(?:Skaters|Goalies))/i);
+     const m=s.match(/([^\n]+(?:Skaters|Goalies))/i);
      if(m){heading=m[1];break}
    }
  }
