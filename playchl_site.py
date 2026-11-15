@@ -179,12 +179,18 @@ const links=[...document.querySelectorAll('a[href*="/games/"]')].map(a=>{
 return {text,tables,links};
 }"""
 
-async def get_page(browser,url):
+async def get_page(browser,url,wait_for_games=False):
     page=await browser.new_page(viewport={"width":1440,"height":1000})
     try:
         await page.goto(url,wait_until="domcontentloaded",timeout=35000)
-        try: await page.wait_for_function("document.body && /\\bFINAL\\b/i.test(document.body.innerText)",timeout=12000)
-        except Exception: await page.wait_for_timeout(2500)
+        if wait_for_games:
+            try:
+                await page.wait_for_function("document.querySelectorAll('a[href*=\"/games/\"]').length > 0",timeout=25000)
+            except Exception:
+                await page.wait_for_timeout(5000)
+        else:
+            try: await page.wait_for_function("document.body && /\\bFINAL\\b/i.test(document.body.innerText)",timeout=15000)
+            except Exception: await page.wait_for_timeout(3500)
         return await page.evaluate(EXTRACT_JS)
     finally:await page.close()
 
@@ -193,7 +199,7 @@ async def fetch_playchl_games(limit=25,include_id=None,team_name=None):
     async with async_playwright() as p:
         browser=await p.chromium.launch(headless=True,args=["--no-sandbox"])
         try:
-            schedule=await get_page(browser,f"{BASE}/schedule")
+            schedule=await get_page(browser,f"{BASE}/schedule",wait_for_games=True)
             ids=[]
             matching_ids=[]
             for link in schedule["links"]:
@@ -206,7 +212,7 @@ async def fetch_playchl_games(limit=25,include_id=None,team_name=None):
             if include_id:ids=[include_id]
             elif team_name:ids=(matching_ids or ids[-limit:])[-limit:]
             else:ids=ids[-limit:]
-            LOG.info("PlayCHL schedule discovered %s games; team=%s; checking %s candidate games",
+            LOG.info("PlayCHL schedule discovered %s game links; team=%s; checking %s candidate games",
                      len(schedule["links"]),team_name or "all teams",len(ids))
             for gid in ids:
                 try:
