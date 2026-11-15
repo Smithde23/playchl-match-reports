@@ -220,6 +220,21 @@ async def publish(game,force=False):
 async def fetch_feed():
     if not FEED_URL:
         games=await fetch_playchl_games(limit=PLAYCHL_LOOKBACK,team_name=TARGET_TEAM_NAME) if PLAYCHL_PUBLIC else []
+        # Explicit backfill IDs let us test or recover a known public PlayCHL game
+        # even when the schedule card's team/date metadata was missed by discovery.
+        extra_ids=[x.strip() for x in os.getenv('PLAYCHL_EXTRA_GAME_IDS','').split(',') if x.strip()]
+        known={str(g.get('id')) for g in games}
+        for game_id in extra_ids:
+            if game_id in known:continue
+            try:
+                recovered=await fetch_playchl_games(limit=1,include_id=game_id,team_name=TARGET_TEAM_NAME)
+                for game in recovered:
+                    if is_target_game(game):
+                        games.append(game);known.add(str(game.get('id')))
+                        log.info('Recovered explicitly configured PlayCHL game %s',game_id)
+            except Exception:
+                log.exception('Unable to recover explicitly configured PlayCHL game %s',game_id)
+        games.sort(key=game_date_key,reverse=True)
         return [g for g in games if is_target_game(g)]
     if urlparse(FEED_URL).scheme != 'https':raise ValueError('Feed URL must use HTTPS')
     headers={'Authorization':f'Bearer {FEED_TOKEN}'} if FEED_TOKEN else {}
