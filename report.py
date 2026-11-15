@@ -166,6 +166,8 @@ def render_card(game:dict)->bytes:
                 txt(base+offset,yy,value,13,white,False,anchor)
     draw_skaters(away_skaters,bases[0])
     draw_skaters(home_skaters,bases[1])
+    if not away_skaters and not home_skaters:
+        txt(62,y+82,'Player statistics are still loading; this card will update automatically.',16,muted)
     y=table_bottom+16
     if away_goalies or home_goalies:
         box((35,y,W-35,y+58))
@@ -179,6 +181,6 @@ def render_card(game:dict)->bytes:
                 line=f"{team}: goalie stats unavailable"
             txt(base,y+12,line,14,white,False)
         y+=70
-    txt(45,height-75,'FULL PLAYER BOX SCORE: CSV attached to this Discord report',18,muted)
-    txt(45,height-43,'Only supplied stats shown. Stars: PlayCHL official when available.',16,muted)
+    txt(45,height-75,'PLAYER BOX SCORE: only statistics supplied by PlayCHL are shown',18,muted)
+    txt(45,height-43,'Missing statistics are retried automatically. Stars: PlayCHL official when available.',16,muted)
     buffer=io.BytesIO();im.save(buffer,format='PNG');return buffer.getvalue()
