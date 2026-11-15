@@ -35,12 +35,41 @@ def parse_snapshot(snap, game_id):
     text = snap["text"]
     if not re.search(r"\bFINAL(?:\s*/\s*(?:OT|SO))?\b", text, re.I): return None
     if re.search(r"\bFORFEIT\b", text, re.I): return None
-    # Site lists two full team names followed by their season records and a score.
-    m = re.search(r"([A-Za-z .'-]+)\n\d+-\d+-\d+\n(\d+)\nFINAL(?:\s*/\s*(OT|SO))?[^\n]*\n(\d+)\n([A-Za-z .'-]+)\n\d+-\d+-\d+", text, re.I)
-    if not m:
-        LOG.warning("No verified header for game %s", game_id)
+    # The game header is rendered as a responsive layout, so innerText order
+    # can vary by browser. Resolve scores around FINAL and team names by proximity.
+    lines=[x.strip() for x in text.splitlines() if x.strip()]
+    final_idx=next((i for i,line in enumerate(lines) if re.search(r"\bFINAL\b",line,re.I)),None)
+    if final_idx is None:
+        LOG.warning("No FINAL marker for game %s; page text=%r",game_id,text[:900])
         return None
-    away_name,away_score,extra,home_score,home_name = [x.strip() if x else x for x in m.groups()]
+    final_line=lines[final_idx]
+    inline=re.search(r"(\d+)\s*FINAL(?:\s*/\s*(OT|SO))?\s*(\d+)",final_line,re.I)
+    extra=None
+    if inline:
+        away_score,extra,home_score=inline.groups()
+    else:
+        before=next((x for x in reversed(lines[:final_idx]) if re.fullmatch(r"\d+",x)),None)
+        after=next((x for x in lines[final_idx+1:] if re.fullmatch(r"\d+",x)),None)
+        extra_match=re.search(r"FINAL\s*/\s*(OT|SO)",final_line,re.I)
+        extra=extra_match.group(1) if extra_match else None
+        away_score,home_score=before,after
+    def team_candidate(seq):
+        ignored=("continental hockey league","final","player","skaters","goalies","match stats",
+                 "puck possession","match share","deserve to win","cold players","ea sports")
+        for value in seq:
+            value=value.strip(" •|")
+            if (2<=len(value)<=42 and re.search(r"[A-Za-z]",value)
+                and not re.search(r"\d",value)
+                and not any(term in value.lower() for term in ignored)):
+                return value
+        return None
+    away_name=team_candidate(reversed(lines[:final_idx]))
+    home_name=team_candidate(lines[final_idx+1:])
+    if not (away_name and home_name and away_score is not None and home_score is not None):
+        LOG.warning("Could not resolve game header for %s; final_line=%r preceding=%r following=%r",
+                    game_id,final_line,lines[max(0,final_idx-5):final_idx],lines[final_idx+1:final_idx+6])
+        return None
+    away_score,home_score=int(away_score),int(home_score)
     # The site presents visiting team first and home team second.
     game = {"id": game_id,"status": "final/"+extra.lower() if extra else "final",
             "away":{"name":away_name,"score":int(away_score)},
