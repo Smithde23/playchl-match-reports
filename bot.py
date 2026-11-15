@@ -380,20 +380,40 @@ async def matchrepost(interaction:discord.Interaction,game_id:str):
     await publish(game,force=True)
     await interaction.followup.send('Match report posted again.',ephemeral=True)
 
-@bot.tree.command(name='matchrefresh',description='Admin: check configured game-feed endpoint immediately')
+@bot.tree.command(name='matchrefresh',description='Admin: refresh selected PlayCHL games, or recent schedule if none are configured')
 @app_commands.checks.has_permissions(manage_guild=True)
 async def matchrefresh(interaction:discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     if not FEED_URL and not PLAYCHL_PUBLIC:return await interaction.followup.send('No public PlayCHL reader or GAME_FEED_URL enabled. Use /matchimport.',ephemeral=True)
     count=0;errors=0
     try:
-        games=await fetch_feed()
+        selected_ids=[x.strip() for x in os.getenv('PLAYCHL_EXTRA_GAME_IDS','').split(',') if x.strip()]
+        if selected_ids and not FEED_URL:
+            # Manual refresh is intentionally scoped to the exact IDs supplied by the admin.
+            # Fetch them individually and post oldest-to-newest by the actual game date.
+            games=[]
+            for game_id in selected_ids:
+                try:
+                    recovered=await fetch_playchl_games(limit=1,include_id=game_id,team_name=TARGET_TEAM_NAME)
+                    games.extend(g for g in recovered if is_target_game(g))
+                except Exception:
+                    errors+=1
+                    log.exception('Selected PlayCHL game fetch failed: %s',game_id)
+            games.sort(key=game_date_key)
+            log.info('Manual matchrefresh selected %d configured game IDs; %d valid %s games found',len(selected_ids),len(games),TARGET_TEAM_NAME)
+        else:
+            games=await fetch_feed()
+            games.sort(key=game_date_key)
         for g in games:
             try:
                 if str(g.get('status','')).lower().startswith('final') and await publish(g):count+=1
-            except Exception:errors+=1;log.exception('Game processing error')
-        await interaction.followup.send(f'Checked {len(games)} games. New reports posted: {count}. Errors: {errors}.',ephemeral=True)
-    except Exception as e:await interaction.followup.send(f'Feed error: {e}',ephemeral=True)
+            except Exception:
+                errors+=1
+                log.exception('Game processing error for %s',g.get('id'))
+        await interaction.followup.send(f'Checked {len(games)} selected games. New reports posted: {count}. Errors: {errors}.',ephemeral=True)
+    except Exception as e:
+        log.exception('Manual match refresh failed')
+        await interaction.followup.send(f'Feed error: {e}',ephemeral=True)
 
 @bot.tree.error
 async def command_error(interaction,error):
