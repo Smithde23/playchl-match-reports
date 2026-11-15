@@ -219,22 +219,31 @@ async def publish(game,force=False):
 
 async def fetch_feed():
     if not FEED_URL:
-        games=await fetch_playchl_games(limit=PLAYCHL_LOOKBACK,team_name=TARGET_TEAM_NAME) if PLAYCHL_PUBLIC else []
-        # Explicit backfill IDs let us test or recover a known public PlayCHL game
-        # even when the schedule card's team/date metadata was missed by discovery.
+        # When the admin has supplied explicit game IDs, both manual refresh
+        # and the scheduled 15-minute poll must stay inside that exact set.
+        # Do not mix in the general schedule's newest-ten games.
         extra_ids=[x.strip() for x in os.getenv('PLAYCHL_EXTRA_GAME_IDS','').split(',') if x.strip()]
-        known={str(g.get('id')) for g in games}
-        for game_id in extra_ids:
-            if game_id in known:continue
-            try:
-                recovered=await fetch_playchl_games(limit=1,include_id=game_id,team_name=TARGET_TEAM_NAME)
-                for game in recovered:
-                    if is_target_game(game):
-                        games.append(game);known.add(str(game.get('id')))
-                        log.info('Recovered explicitly configured PlayCHL game %s',game_id)
-            except Exception:
-                log.exception('Unable to recover explicitly configured PlayCHL game %s',game_id)
-        games.sort(key=game_date_key,reverse=True)
+        if extra_ids:
+            games=[]
+            seen=set()
+            for game_id in extra_ids:
+                if game_id in seen:continue
+                seen.add(game_id)
+                try:
+                    recovered=await fetch_playchl_games(limit=1,include_id=game_id,team_name=TARGET_TEAM_NAME)
+                    games.extend(g for g in recovered if is_target_game(g))
+                except Exception:
+                    log.exception('Unable to fetch selected PlayCHL game %s',game_id)
+            games.sort(key=game_date_key)
+            log.info('Selected-game mode: fetched %d of %d configured %s game IDs; no schedule games will be added',
+                     len(games),len(seen),TARGET_TEAM_NAME)
+            for game in games:
+                log.info('Selected match: id=%s date=%s result=%s %s-%s %s',
+                         game.get('id'),game.get('date','Date unavailable'),
+                         game.get('away',{}).get('name'),game.get('away',{}).get('score'),
+                         game.get('home',{}).get('score'),game.get('home',{}).get('name'))
+            return games
+        games=await fetch_playchl_games(limit=PLAYCHL_LOOKBACK,team_name=TARGET_TEAM_NAME) if PLAYCHL_PUBLIC else []
         return [g for g in games if is_target_game(g)]
     if urlparse(FEED_URL).scheme != 'https':raise ValueError('Feed URL must use HTTPS')
     headers={'Authorization':f'Bearer {FEED_TOKEN}'} if FEED_TOKEN else {}
@@ -244,7 +253,9 @@ async def fetch_feed():
             resp.raise_for_status(); data=await resp.json(content_type=None)
     if isinstance(data,dict):data=data.get('games',[])
     if not isinstance(data,list):raise ValueError('Feed must return a list or {"games": [...]}')
-    return [g for g in data[:MAX_FEED_GAMES] if is_target_game(g)]
+    games=[g for g in data[:MAX_FEED_GAMES] if is_target_game(g)]
+    games.sort(key=game_date_key)
+    return games
 
 @tasks.loop(minutes=POLL_MINUTES)
 async def poll_games():
