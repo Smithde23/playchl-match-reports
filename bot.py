@@ -342,6 +342,113 @@ def list_saved_games():
     games.sort(key=lambda g:(game_date_key(g),str(g.get('id'))),reverse=True)
     return games
 
+postall_lock=asyncio.Lock()
+
+def unposted_saved_games():
+    """Games not yet publicly posted, including the original historical baseline."""
+    with db() as conn:
+        rows=conn.execute(
+            "SELECT payload FROM reports WHERE id != '__playchl_baseline__' "
+            "AND (posted_at IS NULL OR posted_at = 'baseline')"
+        ).fetchall()
+    pending=[]
+    for (payload,) in rows:
+        try:
+            game=json.loads(payload)
+            if is_target_game(game):
+                validate(game)
+                pending.append(game)
+        except (ValueError,TypeError,KeyError):
+            log.warning("Skipped invalid unposted match while preparing /postall")
+    pending.sort(key=lambda g:(game_date_key(g),str(g['id'])))
+    return pending
+
+class PostAllConfirmView(discord.ui.View):
+    def __init__(self,owner_id):
+        super().__init__(timeout=120)
+        self.owner_id=owner_id
+
+    async def interaction_check(self,interaction:discord.Interaction):
+        if interaction.user.id!=self.owner_id or not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("Only the administrator who requested this can confirm the bulk post.",ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm: Post ALL unposted",style=discord.ButtonStyle.danger)
+    async def confirm(self,interaction:discord.Interaction,button:discord.ui.Button):
+        if postall_lock.locked():
+            return await interaction.response.send_message("A bulk-post operation is already running.",ephemeral=True)
+        await interaction.response.defer(ephemeral=True,thinking=True)
+        for item in self.children:item.disabled=True
+        try:
+            async with postall_lock:
+                pending=unposted_saved_games()
+                posted_count=0
+                skipped_count=0
+                failed=[]
+                for game in pending:
+                    try:
+                        current,posted=load(game['id'])
+                        # Never duplicate an already public post, even if another
+                        # command or automatic poll just published the same game.
+                        if posted and posted!='baseline':
+                            skipped_count+=1
+                            continue
+                        # Historical baseline is skipped by normal publish; only
+                        # explicit administrator confirmation authorizes posting it.
+                        was_posted=await publish(current or game,force=(posted=='baseline'))
+                        if was_posted:
+                            posted_count+=1
+                        else:
+                            skipped_count+=1
+                    except Exception:
+                        failed.append(str(game['id']))
+                        log.exception("Bulk match-report posting failed for %s",game['id'])
+                result=(f"**Bulk publishing complete.** Posted {posted_count} new public report(s) "
+                        f"in <#{CHANNEL_ID}>. Skipped {skipped_count} already posted game(s). "
+                        f"Failed: {len(failed)}.")
+                if failed:
+                    result+="\nFailed game IDs: "+", ".join(f"[{gid}]" for gid in failed[:10])
+                await interaction.followup.send(result,ephemeral=True)
+        except Exception:
+            log.exception("Bulk match report action failed")
+            await interaction.followup.send("Bulk posting failed; check Railway logs.",ephemeral=True)
+
+    @discord.ui.button(label="Cancel",style=discord.ButtonStyle.secondary)
+    async def cancel(self,interaction:discord.Interaction,button:discord.ui.Button):
+        for item in self.children:item.disabled=True
+        await interaction.response.edit_message(content="Bulk report posting cancelled.",view=None)
+        self.stop()
+
+async def show_postall_confirmation(interaction:discord.Interaction):
+    if not interaction.user.guild_permissions.manage_guild:
+        return await interaction.response.send_message("Manage Server permission is required to post all reports.",ephemeral=True)
+    if not CHANNEL_ID:
+        return await interaction.response.send_message("REPORT_CHANNEL_ID is not configured.",ephemeral=True)
+    count=len(unposted_saved_games())
+    if not count:
+        return await interaction.response.send_message("All saved Capitals games have already been posted. No duplicate reports will be created.",ephemeral=True)
+    await interaction.response.send_message(
+        f"**Post all saved Capitals match reports?**\n"
+        f"This will post **{count} unposted game(s)** to <#{CHANNEL_ID}> "
+        f"**oldest first**, with a separate public card for each game.\n"
+        f"Some older games may have incomplete player statistics. "
+        f"Previously posted games will not be duplicated.\n"
+        f"Select **Confirm** to publish them all.",
+        view=PostAllConfirmView(interaction.user.id),ephemeral=True)
+
+@bot.tree.command(name='postall',description='Admin: confirm posting every saved but unposted Capitals match report publicly')
+@app_commands.checks.has_permissions(manage_guild=True)
+async def postall_command(interaction:discord.Interaction):
+    await show_postall_confirmation(interaction)
+
+class PostAllMenuButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Post ALL unposted games",style=discord.ButtonStyle.primary,row=2)
+
+    async def callback(self,interaction:discord.Interaction):
+        await show_postall_confirmation(interaction)
+
 class GameChoiceSelect(discord.ui.Select):
     def __init__(self,games):
         options=[]
@@ -415,6 +522,7 @@ class GamePickerView(discord.ui.View):
         if pages>1:
             self.add_item(GamePageButton(-1,disabled=self.page==0))
             self.add_item(GamePageButton(1,disabled=self.page>=pages-1))
+        self.add_item(PostAllMenuButton())
 
     def page_caption(self):
         pages=max(1,(len(self.games)+self.PAGE_SIZE-1)//self.PAGE_SIZE)
