@@ -253,20 +253,25 @@ async def fetch_playchl_games(limit=10,include_id=None,team_name=None):
                 candidates=candidates[:candidate_limit]
             LOG.info("PlayCHL schedule discovered %s unique game links; %s team cards matched; checking %s candidates for newest %s complete games",
                      len(entries),sum(1 for entry in entries if entry["is_team"]),len(candidates),limit)
-            for entry in candidates:
+            semaphore=asyncio.Semaphore(5)
+            async def fetch_one(entry):
                 gid=entry["id"]
-                try:
-                    snap=await get_page(browser,f"{BASE}/games/{gid}")
-                    game=parse_snapshot(snap,gid)
-                    if game and team_name:
-                        names=[str(game.get(side,{}).get("name","")).casefold() for side in ("home","away")]
-                        is_target=any(("washington" in name or "capitals" in name or name.strip()=="wsh") for name in names)
-                        if not is_target:
-                            LOG.info("Skipping non-%s game %s: %s",team_name,gid,names)
-                            continue
-                    if game:results.append(game)
-                except Exception:
-                    LOG.exception("Unable to parse PlayCHL game %s",gid)
+                async with semaphore:
+                    try:
+                        snap=await get_page(browser,f"{BASE}/games/{gid}")
+                        game=parse_snapshot(snap,gid)
+                        if game and team_name:
+                            names=[str(game.get(side,{}).get("name","")).casefold() for side in ("home","away")]
+                            is_target=any(("washington" in name or "capitals" in name or name.strip()=="wsh") for name in names)
+                            if not is_target:
+                                LOG.info("Skipping non-%s game %s: %s",team_name,gid,names)
+                                return None
+                        return game
+                    except Exception:
+                        LOG.exception("Unable to parse PlayCHL game %s",gid)
+                        return None
+            fetched=await asyncio.gather(*(fetch_one(entry) for entry in candidates))
+            results.extend(game for game in fetched if game)
         finally:
             await browser.close()
     results.sort(key=lambda game:_date_key(game.get("date")),reverse=True)
