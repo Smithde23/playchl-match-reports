@@ -15,7 +15,7 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands,tasks
-from report import validate,three_stars,stat_line,render_card,summary
+from report import validate,three_stars,stat_line,render_card,summary,num,label
 from playchl_site import fetch_playchl_games
 
 logging.basicConfig(level=logging.INFO)
