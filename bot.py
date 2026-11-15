@@ -351,6 +351,34 @@ def list_saved_games():
     games.sort(key=lambda g:(game_date_key(g),str(g.get('id'))),reverse=True)
     return games
 
+async def announce_bulk_reports_complete(*,total,created,updated,errors,kind):
+    """Send exactly one public announcement after an admin bulk report run."""
+    if created+updated<=0:
+        log.info("Bulk %s completed without published/updated reports; no @everyone alert",kind)
+        return False
+    channel=bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+    if not isinstance(channel,discord.TextChannel):
+        raise RuntimeError("Configured report channel is not a Discord text channel")
+    me=channel.guild.me or channel.guild.get_member(bot.user.id)
+    if me is None:
+        me=await channel.guild.fetch_member(bot.user.id)
+    ping_allowed=channel.permissions_for(me).mention_everyone
+    text=(
+        "🏒 **PLAYCHL MATCH REPORTS ARE LIVE!**\n"
+        +("@everyone\n\n" if ping_allowed else "\n")
+        +f"**{TARGET_TEAM_NAME}** match reports have finished processing.\n"
+        +f"**{total} games checked** • **{created} reports posted** • "
+        +f"**{updated} refreshed** • **{errors} errors**.\n"
+        +"Check this channel for final scores, player statistics, and available game recaps."
+    )
+    await channel.send(
+        content=text,
+        allowed_mentions=discord.AllowedMentions(everyone=ping_allowed,users=False,roles=False),
+    )
+    log.info("Posted one bulk %s completion announcement to channel %s; everyone_ping=%s",
+             kind,CHANNEL_ID,ping_allowed)
+    return ping_allowed
+
 postall_lock=asyncio.Lock()
 
 def unposted_saved_games():
@@ -418,7 +446,19 @@ class PostAllConfirmView(discord.ui.View):
                         f"Failed: {len(failed)}.")
                 if failed:
                     result+="\nFailed game IDs: "+", ".join(f"[{gid}]" for gid in failed[:10])
-                await interaction.followup.send(result,ephemeral=True)
+                try:
+                    pinged=await announce_bulk_reports_complete(
+                        total=len(pending),created=posted_count,updated=0,
+                        errors=len(failed),kind='postall')
+                    result+=("\nOne @everyone announcement was posted."
+                             if pinged else "\nPublic completion notice posted without an @everyone ping (or no reports were published).")
+                except Exception:
+                    log.exception("Could not send bulk postall completion announcement")
+                    result+="\nPublic completion announcement failed; check bot permissions and Railway logs."
+                try:
+                    await interaction.followup.send(result,ephemeral=True)
+                except discord.HTTPException:
+                    log.warning("Original /postall interaction expired; public completion announcement was handled independently")
         except Exception:
             log.exception("Bulk match report action failed")
             await interaction.followup.send("Bulk posting failed; check Railway logs.",ephemeral=True)
@@ -629,7 +669,19 @@ class RedoAllConfirmView(discord.ui.View):
                          f"**{len(errors)} errors** in <#{CHANNEL_ID}>.")
                 if errors:
                     message+="\nFailed IDs: "+", ".join(errors[:10])
-                await interaction.followup.send(message,ephemeral=True)
+                try:
+                    pinged=await announce_bulk_reports_complete(
+                        total=len(games),created=created,updated=updated,
+                        errors=len(errors),kind='redoall')
+                    message+=("\nOne @everyone announcement was posted."
+                              if pinged else "\nPublic completion notice posted without an @everyone ping (or no reports were published).")
+                except Exception:
+                    log.exception("Could not send bulk redo completion announcement")
+                    message+="\nPublic completion announcement failed; check bot permissions and Railway logs."
+                try:
+                    await interaction.followup.send(message,ephemeral=True)
+                except discord.HTTPException:
+                    log.warning("Original /redopostall interaction expired; public completion announcement was handled independently")
         except Exception:
             log.exception("Unable to discover and redo complete PlayCHL match history")
             await interaction.followup.send(
