@@ -176,7 +176,9 @@ async def matchstats(interaction:discord.Interaction,game_id:str):
     if not game:return await interaction.response.send_message('Game ID not found.',ephemeral=True)
     players=game.get('players',[])
     if not players:return await interaction.response.send_message('No individual player box stats for this game.',ephemeral=True)
-    headers=['team','name','position','goals','assists','points','plus_minus','shots','hits','penalty_minutes','giveaways','takeaways','faceoffs_won','faceoffs_taken','saves','shots_against','goals_against','save_pct']
+    preferred=['team','name','position','goals','assists','points','plus_minus','shots','hits','time_on_ice','time_with_puck','passing_pct','faceoffs_won','faceoffs_taken','penalty_minutes','giveaways','takeaways','blocks','interceptions','saves','shots_against','goals_against','save_pct','gaa','player_score']
+    present=set().union(*(p.keys() for p in players))
+    headers=[k for k in preferred if k in present]+sorted(present-set(preferred))
     buf=io.StringIO();writer=csv.DictWriter(buf,fieldnames=headers,extrasaction='ignore');writer.writeheader();writer.writerows(players)
     await interaction.response.send_message(file=discord.File(io.BytesIO(buf.getvalue().encode('utf-8')),filename=f'boxstats_{game_id[:50]}.csv'),ephemeral=True)
 
