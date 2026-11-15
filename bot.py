@@ -223,6 +223,34 @@ async def matchreport(interaction:discord.Interaction,game_id:str):
     if csv_bytes:files.append(discord.File(io.BytesIO(csv_bytes),filename=f"boxstats_{safe_id}.csv"))
     await interaction.followup.send(embed=report_embed(game),files=files,ephemeral=True)
 
+@bot.tree.command(name='latestreport',description='Show the most recently saved Washington Capitals match report without a game ID')
+async def latestreport(interaction:discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    with db() as conn:
+        rows=conn.execute(
+            "SELECT payload FROM reports WHERE id != '__playchl_baseline__' ORDER BY rowid DESC LIMIT 100"
+        ).fetchall()
+    game=None
+    for (payload,) in rows:
+        candidate=json.loads(payload)
+        if is_target_game(candidate):
+            game=candidate
+            break
+    if not game:
+        return await interaction.followup.send(
+            f"No saved {TARGET_TEAM_NAME} match report was found yet. The next completed game will appear here after it is imported.",
+            ephemeral=True
+        )
+    safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
+    files=[discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")]
+    csv_bytes=build_boxscore_csv(game)
+    if csv_bytes:
+        files.append(discord.File(io.BytesIO(csv_bytes),filename=f"boxstats_{safe_id}.csv"))
+    await interaction.followup.send(
+        content="**Most recently saved Washington Capitals match report**",
+        embed=report_embed(game),files=files,ephemeral=True
+    )
+
 @bot.tree.command(name='matchimport',description='Admin: import final game stats from a JSON attachment and publish')
 @app_commands.describe(file='JSON file with game box stats',publish_now='Publish immediately to report channel')
 @app_commands.checks.has_permissions(manage_guild=True)
