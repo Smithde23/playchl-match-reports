@@ -547,6 +547,131 @@ async def clearchannel_command(interaction:discord.Interaction,bot_only:bool=Fal
 async def postall_command(interaction:discord.Interaction):
     await show_postall_confirmation(interaction)
 
+async def discover_all_match_reports():
+    """Combine every stored Capitals game with every final on the public schedule."""
+    saved=list_saved_games()
+    combined={str(g['id']):g for g in saved}
+    discovered=0
+    if PLAYCHL_PUBLIC and not FEED_URL:
+        # None means no newest-10 truncation. All matching schedule cards are
+        # checked, not just the games already present in SQLite.
+        found=await fetch_playchl_games(limit=None,team_name=TARGET_TEAM_NAME)
+        discovered=len(found)
+        if not found:
+            raise RuntimeError("No completed Capitals games were discovered on PlayCHL; no bulk repost was started.")
+        for game in found:
+            gid=str(game['id'])
+            existing=combined.get(gid)
+            if existing is None or report_quality(game)>report_quality(existing):
+                combined[gid]=game
+        # Previously supplied direct links may not occur among schedule cards.
+        backfill_ids=[x.strip() for x in os.getenv('PLAYCHL_EXTRA_GAME_IDS','').split(',') if x.strip()]
+        for gid in dict.fromkeys(backfill_ids):
+            if gid in combined:continue
+            try:
+                extras=await fetch_playchl_games(include_id=gid,team_name=TARGET_TEAM_NAME)
+                for game in extras:
+                    combined[str(game['id'])]=game
+            except Exception:
+                log.exception("Could not backfill supplemental PlayCHL ID %s",gid)
+    elif FEED_URL:
+        # The JSON feed can have a limited horizon, but saved history is retained.
+        for game in await fetch_feed():
+            gid=str(game['id'])
+            existing=combined.get(gid)
+            if existing is None or report_quality(game)>report_quality(existing):
+                combined[gid]=game
+    games=list(combined.values())
+    games.sort(key=lambda g:(game_date_key(g),str(g.get('id'))))
+    return games,discovered,len(saved)
+
+class RedoAllConfirmView(discord.ui.View):
+    def __init__(self,owner_id):
+        super().__init__(timeout=180)
+        self.owner_id=owner_id
+
+    async def interaction_check(self,interaction:discord.Interaction):
+        if (interaction.user.id!=self.owner_id or not interaction.guild
+                or not interaction.user.guild_permissions.manage_guild):
+            await interaction.response.send_message("Only the administrator who opened this confirmation may run it.",ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm: REDO ALL played games",style=discord.ButtonStyle.danger)
+    async def confirm(self,interaction:discord.Interaction,button:discord.ui.Button):
+        if postall_lock.locked() or clear_channel_lock.locked():
+            return await interaction.response.send_message("A bulk operation is in progress.",ephemeral=True)
+        await interaction.response.defer(ephemeral=True,thinking=True)
+        for item in self.children:item.disabled=True
+        try:
+            async with postall_lock:
+                games,from_schedule,from_saved=await discover_all_match_reports()
+                updated=0
+                created=0
+                errors=[]
+                for game in games:
+                    try:
+                        with db() as conn:
+                            row=conn.execute(
+                                "SELECT posted_at,message_id FROM reports WHERE id=?",
+                                (str(game['id']),)).fetchone()
+                        had_public=bool(row and row[0] and row[0]!='baseline' and row[1])
+                        result=await publish(game,replace_existing=True)
+                        if result:
+                            if had_public:updated+=1
+                            else:created+=1
+                    except Exception:
+                        errors.append(str(game.get('id')))
+                        log.exception("Redo all failed for PlayCHL game %s",game.get('id'))
+                message=(f"**Redo All complete.** Checked **{len(games)} unique games** "
+                         f"({from_schedule} final games found on PlayCHL; {from_saved} previously saved).\n"
+                         f"**{updated} existing posts refreshed**, **{created} public posts created**, "
+                         f"**{len(errors)} errors** in <#{CHANNEL_ID}>.")
+                if errors:
+                    message+="\nFailed IDs: "+", ".join(errors[:10])
+                await interaction.followup.send(message,ephemeral=True)
+        except Exception:
+            log.exception("Unable to discover and redo complete PlayCHL match history")
+            await interaction.followup.send(
+                "Could not finish the full PlayCHL history scan. Existing public posts were not cleared. "
+                "Check Railway logs; the website may be missing schedule results.",ephemeral=True)
+
+    @discord.ui.button(label="Cancel",style=discord.ButtonStyle.secondary)
+    async def cancel(self,interaction:discord.Interaction,button:discord.ui.Button):
+        await interaction.response.edit_message(content="Redo All cancelled; nothing was reposted.",view=None)
+        self.stop()
+
+async def show_redoall_confirmation(interaction:discord.Interaction):
+    if not interaction.guild or not interaction.user.guild_permissions.manage_guild:
+        return await interaction.response.send_message("Manage Server permission required.",ephemeral=True)
+    if not CHANNEL_ID:
+        return await interaction.response.send_message("REPORT_CHANNEL_ID is missing.",ephemeral=True)
+    with db() as conn:
+        saved_count=conn.execute("SELECT COUNT(*) FROM reports WHERE id != '__playchl_baseline__'").fetchone()[0]
+    await interaction.response.send_message(
+        f"**REDO ALL Washington Capitals match reports**\n"
+        f"Currently saved: **{saved_count} games**. The bot will also scan the "
+        f"**full accessible PlayCHL schedule**, rather than stopping at 10 games.\n"
+        f"Previously posted reports will be **updated in place**; reports that "
+        f"have never been posted or were deleted will be posted in <#{CHANNEL_ID}>.\n"
+        "Every uniquely identified, completed game found will be processed oldest first. "
+        "The bot will not invent missing games or player statistics. "
+        "Scanning older results may take several minutes.\n"
+        "**Confirm to start the full-history scan and public report refresh.**",
+        view=RedoAllConfirmView(interaction.user.id),ephemeral=True)
+
+@bot.tree.command(name='redopostall',description='Admin: rescan all PlayCHL Capitals games and refresh every public report')
+@app_commands.checks.has_permissions(manage_guild=True)
+async def redopostall_command(interaction:discord.Interaction):
+    await show_redoall_confirmation(interaction)
+
+class RedoAllMenuButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Redo ALL played games",style=discord.ButtonStyle.secondary,row=3)
+
+    async def callback(self,interaction:discord.Interaction):
+        await show_redoall_confirmation(interaction)
+
 class PostAllMenuButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="Post ALL unposted games",style=discord.ButtonStyle.primary,row=2)
@@ -628,6 +753,7 @@ class GamePickerView(discord.ui.View):
             self.add_item(GamePageButton(-1,disabled=self.page==0))
             self.add_item(GamePageButton(1,disabled=self.page>=pages-1))
         self.add_item(PostAllMenuButton())
+        self.add_item(RedoAllMenuButton())
 
     def page_caption(self):
         pages=max(1,(len(self.games)+self.PAGE_SIZE-1)//self.PAGE_SIZE)
