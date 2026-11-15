@@ -164,7 +164,15 @@ for(const row of rowEls){
     tables.push({heading,rows:[cells]});
   }
 }
-const links=[...document.querySelectorAll('a[href*="/games/"]')].map(a=>({href:a.getAttribute('href'),text:(a.innerText||'').trim()}));
+const links=[...document.querySelectorAll('a[href*="/games/"]')].map(a=>{
+ let node=a,context='';
+ for(let i=0;i<8&&node;i++,node=node.parentElement){
+   const alts=[...node.querySelectorAll('img')].map(img=>img.alt||'').join(' ');
+   const candidate=((node.innerText||'')+' '+alts).trim();
+   if(/Washington|Capitals|\\bWSH\\b/i.test(candidate)&&candidate.length<1600){context=candidate;break}
+ }
+ return {href:a.getAttribute('href'),text:(a.innerText||'').trim(),context};
+});
 return {text,tables,links};
 }"""
 
@@ -177,23 +185,36 @@ async def get_page(browser,url):
         return await page.evaluate(EXTRACT_JS)
     finally:await page.close()
 
-async def fetch_playchl_games(limit=25,include_id=None):
+async def fetch_playchl_games(limit=25,include_id=None,team_name=None):
     results=[]
     async with async_playwright() as p:
         browser=await p.chromium.launch(headless=True,args=["--no-sandbox"])
         try:
             schedule=await get_page(browser,f"{BASE}/schedule")
             ids=[]
+            matching_ids=[]
             for link in schedule["links"]:
                 m=re.search(r"/games/([a-fA-F0-9]{24})",link["href"] or "")
-                if m and m.group(1) not in ids:ids.append(m.group(1))
+                if m and m.group(1) not in ids:
+                    ids.append(m.group(1))
+                    context=(link.get("context","")+" "+link.get("text","")).casefold()
+                    if team_name and ("washington" in context or "capitals" in context or re.search(r"\\bwsh\\b",context)):
+                        matching_ids.append(m.group(1))
             if include_id:ids=[include_id]
+            elif team_name:ids=(matching_ids or ids[-limit:])[-limit:]
             else:ids=ids[-limit:]
-            LOG.info("PlayCHL schedule discovered %s games, checking %s",len(schedule["links"]),len(ids))
+            LOG.info("PlayCHL schedule discovered %s games; team=%s; checking %s candidate games",
+                     len(schedule["links"]),team_name or "all teams",len(ids))
             for gid in ids:
                 try:
                     snap=await get_page(browser,f"{BASE}/games/{gid}")
                     game=parse_snapshot(snap,gid)
+                    if game and team_name:
+                        names=[str(game.get(side,{}).get("name","")).casefold() for side in ("home","away")]
+                        is_target=any(("washington" in n or "capitals" in n or n.strip()=="wsh") for n in names)
+                        if not is_target:
+                            LOG.info("Skipping non-%s game %s: %s",team_name,gid,names)
+                            continue
                     if game:results.append(game)
                 except Exception:LOG.exception("Unable to parse PlayCHL game %s",gid)
         finally:await browser.close()
