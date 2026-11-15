@@ -63,9 +63,163 @@ def build_boxscore_csv(game):
     """Return every available player-stat field as UTF-8 CSV bytes."""
     players=game.get('players') or []
     if not players:return None
+    preferred=['team','name','position','goals','assists','points','plus_minus','shots',
+               'hits','time_on_ice','time_with_puck','passing_pct','faceoffs_won',
+               'faceoffs_taken','penalty_minutes','giveaways','takeaways','blocks',
+               'interceptions','saves','shots_against','goals_against','save_pct','gaa',
+               'player_score','breakaway_pct','breakaways','diving_saves',
+               'penalty_shot_pct','poke_checks']
+    present=set().union(*(p.keys() for p in players))
+    headers=[k for k in preferred if k in present]+sorted(present-set(preferred))
+    buf=io.StringIO()
+    writer=csv.DictWriter(buf,fieldnames=headers,extrasaction='ignore')
+    writer.writeheader()
+    writer.writerows(players)
+    return buf.getvalue().encode('utf-8')
+
+def report_embed(game):
+    em=discord.Embed(title='🏒 PLAYCHL • FINAL MATCH REPORT',description=f'**{summary(game)}**',color=0x2EA8DF)
+    em.add_field(name='🥇 1st Star',value='Not available',inline=True)
+    em.add_field(name='🥈 2nd Star',value='Not available',inline=True)
+    em.add_field(name='🥉 3rd Star',value='Not available',inline=True)
+    for i,p in enumerate(three_stars(game)):
+        em.set_field_at(i,name=('🥇 1st Star','🥈 2nd Star','🥉 3rd Star')[i],value=f"**{p['name']}** ({p['team']})\n{stat_line(p)}",inline=True)
+    em.add_field(name='Game ID',value=str(game['id']),inline=True)
+    if game.get('source_url'):
+        u=str(game['source_url'])
+        if urlparse(u).scheme in ('https','http'):em.url=u
+    em.set_footer(text='Full player box score attached as CSV' if game.get('players') else 'Player box score unavailable')
+    return em
+
+intents=discord.Intents.default()
+bot=commands.Bot(command_prefix='!',intents=intents)
+post_lock=asyncio.Lock()
+
+async def publish(game,force=False):
+    validate(game)
+    if not is_target_game(game):
+        raise ValueError(f'This bot only publishes {TARGET_TEAM_NAME} games.')
+    store(game)
+    if not CHANNEL_ID:raise RuntimeError('REPORT_CHANNEL_ID is not set')
+    async with post_lock:
+        _,posted=load(game['id'])
+        if posted and not force:return False
+        ch=bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+        safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
+        files=[discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")]
+        csv_bytes=build_boxscore_csv(game)
+        if csv_bytes:
+            files.append(discord.File(io.BytesIO(csv_bytes),filename=f"boxstats_{safe_id}.csv"))
+        msg=await ch.send(embed=report_embed(game),files=files)
+        with db() as c:
+            c.execute('UPDATE reports SET posted_at=?,message_id=?,channel_id=? WHERE id=?',(datetime.now(timezone.utc).isoformat(),str(msg.id),str(ch.id),str(game['id'])))
+        return True
+
+async def fetch_feed():
+    if not FEED_URL:
+        games=await fetch_playchl_games(limit=PLAYCHL_LOOKBACK,team_name=TARGET_TEAM_NAME) if PLAYCHL_PUBLIC else []
+        return [g for g in games if is_target_game(g)]
+    if urlparse(FEED_URL).scheme != 'https':raise ValueError('Feed URL must use HTTPS')
+    headers={'Authorization':f'Bearer {FEED_TOKEN}'} if FEED_TOKEN else {}
+    timeout=aiohttp.ClientTimeout(total=25)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(FEED_URL,headers=headers) as resp:
+            resp.raise_for_status(); data=await resp.json(content_type=None)
+    if isinstance(data,dict):data=data.get('games',[])
+    if not isinstance(data,list):raise ValueError('Feed must return a list or {"games": [...]}')
+    return [g for g in data[:MAX_FEED_GAMES] if is_target_game(g)]
+
+@tasks.loop(minutes=POLL_MINUTES)
+async def poll_games():
+    if not FEED_URL and not PLAYCHL_PUBLIC:return
+    try:
+        games=await fetch_feed()
+        # First successful discovery creates a baseline; never dump old games into Discord.
+        if PLAYCHL_PUBLIC and not FEED_URL and games:
+            with db() as conn:
+                initialized=conn.execute("SELECT 1 FROM reports WHERE id='__playchl_baseline__'").fetchone()
+                if not initialized:
+                    for g in games:
+                        validate(g)
+                        conn.execute('INSERT INTO reports(id,payload,posted_at) VALUES (?,?,?) ON CONFLICT(id) DO NOTHING',(str(g['id']),json.dumps(g),'baseline'))
+                    conn.execute("INSERT INTO reports(id,payload,posted_at) VALUES (?,?,?)",('__playchl_baseline__','{}','baseline'))
+                    log.info('Recorded %d historical PlayCHL games without posting',len(games))
+                    return
+        for g in games:
+            try:
+                if g.get('status','').lower().startswith('final'):
+                    await publish(g)
+            except Exception:log.exception('Unable to publish game %s',g.get('id'))
+    except Exception:log.exception('Game feed fetch failed')
+
+@poll_games.before_loop
+async def before_poll():await bot.wait_until_ready()
+
+@bot.event
+async def on_ready():
+    log.info('Match bot online as %s',bot.user)
+    if not poll_games.is_running():poll_games.start()
+
+@bot.event
+async def setup_hook():
+    db().close()
+    if GUILD_ID:
+        guild=discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=guild)
+        await bot.tree.sync(guild=guild)
+    else:await bot.tree.sync()
+
+@bot.tree.command(name='matchreport',description='Show a previously imported game report')
+@app_commands.describe(game_id='Game identifier from the match feed')
+async def matchreport(interaction:discord.Interaction,game_id:str):
+    await interaction.response.defer(ephemeral=True)
+    game,_=load(game_id)
+    if not game:return await interaction.followup.send('Game not found. Import its box-score JSON first.',ephemeral=True)
+    if not is_target_game(game):return await interaction.followup.send(f'This bot is configured for {TARGET_TEAM_NAME} games only.',ephemeral=True)
+    safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
+    files=[discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")]
+    csv_bytes=build_boxscore_csv(game)
+    if csv_bytes:files.append(discord.File(io.BytesIO(csv_bytes),filename=f"boxstats_{safe_id}.csv"))
+    await interaction.followup.send(embed=report_embed(game),files=files,ephemeral=True)
+
+@bot.tree.command(name='matchimport',description='Admin: import final game stats from a JSON attachment and publish')
+@app_commands.describe(file='JSON file with game box stats',publish_now='Publish immediately to report channel')
+@app_commands.checks.has_permissions(manage_guild=True)
+async def matchimport(interaction:discord.Interaction,file:discord.Attachment,publish_now:bool=True):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        if file.size>2_000_000:raise ValueError('File exceeds 2MB')
+        game=json.loads((await file.read()).decode('utf-8'))
+        validate(game);store(game)
+        published=await publish(game) if publish_now else False
+        await interaction.followup.send(f"Imported game **{game['id']}**. "+('Posted to match-report channel.' if published else 'Saved (or already posted).'),ephemeral=True)
+    except Exception as e:await interaction.followup.send(f'Import failed: {e}',ephemeral=True)
+
+@bot.tree.command(name='matchfetch',description='Admin: retrieve a Washington Capitals game and publish its complete report')
+@app_commands.checks.has_permissions(manage_guild=True)
+async def matchfetch(interaction:discord.Interaction,game_id:str,publish_now:bool=True):
+    await interaction.response.defer(ephemeral=True)
+    import re
+    if not re.fullmatch(r'[0-9a-fA-F]{24}',game_id):
+        return await interaction.followup.send('Use the 24-character PlayCHL game ID from the game URL.',ephemeral=True)
+    try:
+        games=await fetch_playchl_games(include_id=game_id,team_name=TARGET_TEAM_NAME)
+        if not games:return await interaction.followup.send(f'No complete {TARGET_TEAM_NAME} box score was extracted for that ID. Non-Capitals games are ignored; nothing was posted.',ephemeral=True)
+        game=games[0];store(game)
+        posted=await publish(game) if publish_now else False
+        await interaction.followup.send(('Posted.' if posted else 'Saved; already published or publish_now disabled.')+f' {summary(game)}',ephemeral=True)
+    except Exception:
+        log.exception('PlayCHL manual fetch failed')
+        await interaction.followup.send('Page fetch failed; see Railway logs.',ephemeral=True)
+
+@bot.tree.command(name='matchstats',description='Download the full available skater and goalie box stats for a game')
+async def matchstats(interaction:discord.Interaction,game_id:str):
+    game,_=load(game_id)
+    if not game:return await interaction.response.send_message('Game ID not found.',ephemeral=True)
+    players=game.get('players',[])
+    if not players:return await interaction.response.send_message('No individual player box stats for this game.',ephemeral=True)
     csv_bytes=build_boxscore_csv(game)
     if not csv_bytes:return await interaction.response.send_message('No individual player box stats for this game.',ephemeral=True)
-
     await interaction.response.send_message(file=discord.File(io.BytesIO(csv_bytes),filename=f'boxstats_{game_id[:50]}.csv'),ephemeral=True)
 
 @bot.tree.command(name='matchhistory',description='Show recent imported games')
