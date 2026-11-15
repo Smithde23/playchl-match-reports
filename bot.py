@@ -96,7 +96,19 @@ async def fetch_feed():
 async def poll_games():
     if not FEED_URL and not PLAYCHL_PUBLIC:return
     try:
-        for g in await fetch_feed():
+        games=await fetch_feed()
+        # First successful discovery creates a baseline; never dump old games into Discord.
+        if PLAYCHL_PUBLIC and not FEED_URL and games:
+            with db() as conn:
+                initialized=conn.execute("SELECT 1 FROM reports WHERE id='__playchl_baseline__'").fetchone()
+                if not initialized:
+                    for g in games:
+                        store(g)
+                        conn.execute('UPDATE reports SET posted_at=? WHERE id=?',('baseline',str(g['id'])))
+                    conn.execute("INSERT INTO reports(id,payload,posted_at) VALUES (?,?,?)",('__playchl_baseline__','{}','baseline'))
+                    log.info('Recorded %d historical PlayCHL games without posting',len(games))
+                    return
+        for g in games:
             try:
                 if g.get('status','').lower().startswith('final'):
                     await publish(g)
