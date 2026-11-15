@@ -98,7 +98,7 @@ def parse_snapshot(snap, game_id):
                 game["team_stats"]["home"][key]=lines[i+1]
     return game
 
-EXTRACT_JS = """() => {
+EXTRACT_JS = r"""() => {
 const text=document.body.innerText;
 const tables=[...document.querySelectorAll('table')].map(t=>{
  let prev=t, heading='';
