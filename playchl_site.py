@@ -169,10 +169,10 @@ for(const row of rowEls){
 }
 const links=[...document.querySelectorAll('a[href*="/games/"]')].map(a=>{
  let node=a,context='';
- for(let i=0;i<8&&node;i++,node=node.parentElement){
+ for(let i=0;i<12&&node;i++,node=node.parentElement){
    const alts=[...node.querySelectorAll('img')].map(img=>img.alt||'').join(' ');
    const candidate=((node.innerText||'')+' '+alts).trim();
-   if(/Washington|Capitals|\bWSH\b/i.test(candidate)&&candidate.length<1600){context=candidate;break}
+   if(/Washington|Capitals|\bWSH\b/i.test(candidate)&&candidate.length<5000){context=candidate;break}
  }
  return {href:a.getAttribute('href'),text:(a.innerText||'').trim(),context};
 });
@@ -194,37 +194,80 @@ async def get_page(browser,url,wait_for_games=False):
         return await page.evaluate(EXTRACT_JS)
     finally:await page.close()
 
-async def fetch_playchl_games(limit=25,include_id=None,team_name=None):
+def _date_key(value):
+    """Parse PlayCHL's displayed game date for true chronological sorting."""
+    value=str(value or "")
+    patterns=[
+        (r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4},\s+\d{1,2}:\d{2}\s*[AP]M", "%b %d, %Y, %I:%M %p"),
+        (r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}", "%b %d, %Y"),
+        (r"\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}\s*[AP]M", "%m/%d/%Y %I:%M %p"),
+        (r"\d{1,2}/\d{1,2}/\d{4}", "%m/%d/%Y"),
+        (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?", None),
+        (r"\d{4}-\d{2}-\d{2}", "%Y-%m-%d"),
+    ]
+    for pattern,fmt in patterns:
+        match=re.search(pattern,value,re.I)
+        if not match:continue
+        raw=match.group(0)
+        try:
+            if fmt:
+                dt=datetime.strptime(raw,fmt)
+            else:
+                dt=datetime.fromisoformat(raw.replace("Z","+00:00"))
+            if dt.tzinfo is None:dt=dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+async def fetch_playchl_games(limit=10,include_id=None,team_name=None):
+    """Return the newest complete games, sorted by the actual game date."""
     results=[]
     async with async_playwright() as p:
         browser=await p.chromium.launch(headless=True,args=["--no-sandbox"])
         try:
             schedule=await get_page(browser,f"{BASE}/schedule",wait_for_games=True)
-            ids=[]
-            matching_ids=[]
+            entries=[]
+            seen=set()
             for link in schedule["links"]:
-                m=re.search(r"/games/([a-fA-F0-9]{24})",link["href"] or "")
-                if m and m.group(1) not in ids:
-                    ids.append(m.group(1))
-                    context=(link.get("context","")+" "+link.get("text","")).casefold()
-                    if team_name and ("washington" in context or "capitals" in context or re.search(r"\bwsh\b",context)):
-                        matching_ids.append(m.group(1))
-            if include_id:ids=[include_id]
-            elif team_name:ids=(matching_ids or ids[-limit:])[-limit:]
-            else:ids=ids[-limit:]
-            LOG.info("PlayCHL schedule discovered %s game links; team=%s; checking %s candidate games",
-                     len(schedule["links"]),team_name or "all teams",len(ids))
-            for gid in ids:
+                match=re.search(r"/games/([a-fA-F0-9]{24})",link.get("href") or "")
+                if not match:continue
+                gid=match.group(1)
+                if gid in seen:continue
+                seen.add(gid)
+                context=(link.get("context","")+" "+link.get("text","")).strip()
+                is_team=bool(team_name and re.search(r"Washington|Capitals|\bWSH\b",context,re.I))
+                entries.append({"id":gid,"context":context,"is_team":is_team,
+                                "date":_date_key(context)})
+            if include_id:
+                candidates=[{"id":include_id,"context":"","date":datetime.min.replace(tzinfo=timezone.utc)}]
+            else:
+                team_entries=[entry for entry in entries if entry["is_team"]]
+                if team_name and team_entries:
+                    candidates=team_entries
+                else:
+                    candidates=entries
+                candidates.sort(key=lambda entry:entry["date"],reverse=True)
+                # Check a larger candidate window, then select the newest complete final games.
+                candidate_limit=max(limit*5,50) if team_name else max(limit*5,50)
+                candidates=candidates[:candidate_limit]
+            LOG.info("PlayCHL schedule discovered %s unique game links; %s team cards matched; checking %s candidates for newest %s complete games",
+                     len(entries),sum(1 for entry in entries if entry["is_team"]),len(candidates),limit)
+            for entry in candidates:
+                gid=entry["id"]
                 try:
                     snap=await get_page(browser,f"{BASE}/games/{gid}")
                     game=parse_snapshot(snap,gid)
                     if game and team_name:
                         names=[str(game.get(side,{}).get("name","")).casefold() for side in ("home","away")]
-                        is_target=any(("washington" in n or "capitals" in n or n.strip()=="wsh") for n in names)
+                        is_target=any(("washington" in name or "capitals" in name or name.strip()=="wsh") for name in names)
                         if not is_target:
                             LOG.info("Skipping non-%s game %s: %s",team_name,gid,names)
                             continue
                     if game:results.append(game)
-                except Exception:LOG.exception("Unable to parse PlayCHL game %s",gid)
-        finally:await browser.close()
-    return results
+                except Exception:
+                    LOG.exception("Unable to parse PlayCHL game %s",gid)
+        finally:
+            await browser.close()
+    results.sort(key=lambda game:_date_key(game.get("date")),reverse=True)
+    return results[:limit] if limit and not include_id else results
