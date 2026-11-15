@@ -86,11 +86,16 @@ def render_card(game:dict)->bytes:
     W=1200; h,a=game['home'],game['away']; players=game.get('players',[])
     home_players=[p for p in players if p['team']==h['name']]
     away_players=[p for p in players if p['team']==a['name']]
+    is_goalie=lambda p:str(p.get('position','')).upper() in ('G','GOL','GOALIE')
+    home_goalies=[p for p in home_players if is_goalie(p)]
+    away_goalies=[p for p in away_players if is_goalie(p)]
+    home_skaters=[p for p in home_players if not is_goalie(p)]
+    away_skaters=[p for p in away_players if not is_goalie(p)]
     stats=game.get('team_stats') or {}
     pairs=[('Goals','goals'),('Shots','shots'),('Hits','hits'),('Faceoff %','faceoff_pct'),('PIM','penalty_minutes'),('Blocks','blocks'),('Takeaways','takeaways'),('Giveaways','giveaways'),('Interceptions','interceptions'),('Time on attack','time_on_attack')]
     avail=[(name,key) for name,key in pairs if key in stats.get('home',{}) or key in stats.get('away',{})]
     stars=three_stars(game)
-    height=450+max(70,len(avail)*40)+205+max(len(home_players),len(away_players),1)*34+145
+    height=450+max(70,len(avail)*40)+205+max(len(home_skaters),len(away_skaters),1)*34+(70 if home_goalies or away_goalies else 0)+145
     im=Image.new('RGB',(W,height),(12,20,34));d=ImageDraw.Draw(im)
     navy=(12,20,34);panel=(26,40,61);white=(240,246,252);muted=(157,179,204);gold=(245,194,73);blue=(63,162,222)
     def box(xy, fill=panel,r=18):d.rounded_rectangle(xy,radius=r,fill=fill)
@@ -126,23 +131,54 @@ def render_card(game:dict)->bytes:
         txt(W-100,yy,label(stats.get('home',{}).get(key)),22,white,True,'ra')
     if not avail:txt(65,y+61,'Team statistics not supplied',21,muted)
     y+=75+len(avail)*40;txt(45,y,'PLAYER BOX SCORE',26,blue,True);y+=44
-    box((35,y,W-35,y+68+max(len(home_players),len(away_players),1)*34))
+    skater_count=max(len(away_skaters),len(home_skaters),1)
+    table_bottom=y+68+skater_count*34
+    box((35,y,W-35,table_bottom))
     txt(62,y+12,f"{a['name']} PLAYERS",20,white,True)
     txt(635,y+12,f"{h['name']} PLAYERS",20,white,True)
-    txt(62,y+36,'PLAYER                  POS   G-A-P    +/-   S   H  BLK   TOI',13,muted,True)
-    txt(635,y+36,'PLAYER                  POS   G-A-P    +/-   S   H  BLK   TOI',13,muted,True)
-    def compact(p):
-        pos=str(p.get('position','—')).upper()
-        name=str(p['name'])[:18]
-        if pos in ('G','GOL','GOALIE'):
-            return f"{name:18}  G  SV {label(p.get('saves')):>2}/{label(p.get('shots_against')):<2} GA {label(p.get('goals_against')):>2}  SV% {label(p.get('save_pct'))}"
-        pts=label(p.get('points',int(num(p.get('goals'))+num(p.get('assists')))))
-        toi=str(p.get('time_on_ice','—'))[:5]
-        return f"{name:18} {pos:>2} {label(p.get('goals'))}-{label(p.get('assists'))}-{pts} {num(p.get('plus_minus')):+.0f} {num(p.get('shots')):>2.0f} {num(p.get('hits')):>2.0f} {num(p.get('blocks')):>2.0f} {toi:>5}"
-    for i in range(max(len(home_players),len(away_players),1)):
-        yy=y+76+i*34
-        if i<len(away_players):txt(62,yy,compact(away_players[i]),13,white)
-        if i<len(home_players):txt(635,yy,compact(home_players[i]),13,white)
+    columns=[('PLAYER',0,'left'),('POS',190,'center'),('G',250,'right'),('A',282,'right'),
+             ('P',314,'right'),('+/-',365,'right'),('S',410,'right'),('H',450,'right'),
+             ('BLK',490,'right'),('TOI',545,'right')]
+    bases=(50,620)
+    for base in bases:
+        for title,offset,align in columns:
+            anchor='lt' if align=='left' else 'mt' if align=='center' else 'rt'
+            txt(base+offset,y+39,title,13,muted,True,anchor)
+    def draw_skaters(rows,base):
+        for i,p in enumerate(rows):
+            yy=y+76+i*34
+            pos=str(p.get('position','—')).upper()[:3]
+            pts=p.get('points',int(num(p.get('goals'))+num(p.get('assists'))))
+            values=[
+                (str(p.get('name',''))[:21],0,'left'),
+                (pos,190,'center'),
+                (label(p.get('goals')),250,'right'),
+                (label(p.get('assists')),282,'right'),
+                (label(pts),314,'right'),
+                (f"{num(p.get('plus_minus')):+.0f}" if p.get('plus_minus') is not None else '—',365,'right'),
+                (label(p.get('shots')),410,'right'),
+                (label(p.get('hits')),450,'right'),
+                (label(p.get('blocks')),490,'right'),
+                (str(p.get('time_on_ice','—'))[:5],545,'right')
+            ]
+            for value,offset,align in values:
+                anchor='lt' if align=='left' else 'mt' if align=='center' else 'rt'
+                txt(base+offset,yy,value,13,white,False,anchor)
+    draw_skaters(away_skaters,bases[0])
+    draw_skaters(home_skaters,bases[1])
+    y=table_bottom+16
+    if away_goalies or home_goalies:
+        box((35,y,W-35,y+58))
+        for team,goalies,base in ((a['name'],away_goalies,50),(h['name'],home_goalies,620)):
+            if goalies:
+                p=goalies[0]
+                line=(f"{str(p.get('name',''))[:20]}  ·  SV {label(p.get('saves'))}  ·  "
+                      f"SA {label(p.get('shots_against'))}  ·  GA {label(p.get('goals_against'))}  ·  "
+                      f"SV% {label(p.get('save_pct'))}")
+            else:
+                line=f"{team}: goalie stats unavailable"
+            txt(base,y+12,line,14,white,False)
+        y+=70
     txt(45,height-75,'FULL PLAYER BOX SCORE: CSV attached to this Discord report',18,muted)
     txt(45,height-43,'Only supplied stats shown. Stars: PlayCHL official when available.',16,muted)
     buffer=io.BytesIO();im.save(buffer,format='PNG');return buffer.getvalue()
