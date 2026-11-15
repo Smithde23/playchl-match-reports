@@ -115,10 +115,13 @@ def parse_snapshot(snap, game_id):
             stars.append({"name":name.strip(),"position":pos.strip(),
                           "stat_line":line.strip(),"player_score":float(score)})
     game["official_stars"]=stars
-    # A complete player box score is mandatory before auto-publication.
-    if len(game["players"])<8 or len(stars)!=3:
-        LOG.warning("Incomplete game %s: players=%s stars=%s table_headings=%r table_rows=%r",game_id,len(game["players"]),len(stars),[t["heading"] for t in snap["tables"]],[len(t["rows"]) for t in snap["tables"]])
-        return None
+    # A final score is enough to preserve the game. Box-score data may hydrate later;
+    # the bot retries incomplete pages and updates the existing Discord card when richer data arrives.
+    game["boxscore_complete"] = len(game["players"]) >= 8 and len(stars) == 3
+    game["boxscore_players_count"] = len(game["players"])
+    if not game["boxscore_complete"]:
+        LOG.warning("Partial final game %s retained for retry: players=%s stars=%s table_headings=%r table_rows=%r",
+                    game_id,len(game["players"]),len(stars),[t["heading"] for t in snap["tables"]],[len(t["rows"]) for t in snap["tables"]])
     # Team stats are rendered as value / label / value, sometimes with line breaks.
     stat_labels={"Goals":"goals","Shots":"shots","Hits":"hits","TOA":"time_on_attack",
                  "Faceoffs%":"faceoff_pct","PIM":"penalty_minutes","Blocks":"blocks",
@@ -132,41 +135,42 @@ def parse_snapshot(snap, game_id):
     return game
 
 EXTRACT_JS = r"""() => {
-const text=document.body.innerText;
-const getCells = row => {
-  let cells=[...row.querySelectorAll(':scope > td,:scope > th,:scope > [role="cell"],:scope > [role="gridcell"],:scope > div')];
-  if(cells.length<6) cells=[...row.children];
-  return cells.map(c=>(c.innerText||c.textContent||'').trim()).filter(Boolean);
+const text=document.body.innerText || '';
+const norm=s=>(s||'').replace(/\s+/g,' ').trim();
+const getCells=row=>{
+  let kids=[...row.children].filter(el=>norm(el.innerText||el.textContent));
+  if(kids.length<6)kids=[...row.querySelectorAll(':scope > td,:scope > th,:scope > [role="cell"],:scope > [role="gridcell"],:scope > div')].filter(el=>norm(el.innerText||el.textContent));
+  return kids.map(el=>norm(el.innerText||el.textContent)).filter(Boolean);
 };
-const rowEls=[...document.querySelectorAll('tr,[role="row"],[class*="player-row"],[class*="playerRow"],[class*="grid-row"],[class*="stat-row"]')];
-const tables=[];
-for(const table of document.querySelectorAll('table,[role="table"],[role="grid"]')){
-  let heading='';
-  let node=table;
-  for(let i=0;i<7&&node;i++,node=node.parentElement){
-    const prev=node.previousElementSibling;
-    const val=(prev?.innerText||'').trim();
-    if(/(skaters|goalies)/i.test(val)&&val.length<180){heading=val;break}
-    const m=(node.innerText||'').slice(0,300).match(/([^\n]+(?:Skaters|Goalies))/i);
-    if(m){heading=m[1];break}
+const isSection=s=>/(skaters|goalies)/i.test(s||'');
+const sectionHeading=node=>{
+  let cur=node;
+  for(let depth=0;depth<10&&cur;depth++,cur=cur.parentElement){
+    const lines=(cur.innerText||'').split(/\n/).map(x=>x.trim()).filter(Boolean);
+    const found=lines.find(line=>line.length<120&&isSection(line)&&!/^player$/i.test(line));
+    if(found)return found;
+    let prev=cur.previousElementSibling;
+    for(let n=0;n<3&&prev;n++,prev=prev.previousElementSibling){
+      const val=(prev.innerText||'').trim();
+      if(val.length<160&&isSection(val))return val;
+    }
   }
-  const rows=[...table.querySelectorAll('tr,[role="row"]')].map(getCells).filter(r=>r.length>=6);
-  tables.push({heading,rows});
+  return '';
+};
+const grouped=new Map();
+const candidates=[...document.querySelectorAll('tr,[role="row"],[class*="row"],[class*="Row"],[class*="grid"],[class*="Grid"],[class*="flex"],[class*="Flex"]')];
+for(const node of candidates){
+  const cells=getCells(node);
+  if(cells.length<10||cells.length>28)continue;
+  const heading=sectionHeading(node);
+  if(!heading)continue;
+  const key=heading.toLowerCase();
+  if(!grouped.has(key))grouped.set(key,{heading,rows:[]});
+  const bucket=grouped.get(key);
+  const signature=cells.join('|');
+  if(!bucket.rows.some(row=>row.join('|')===signature))bucket.rows.push(cells);
 }
-for(const row of rowEls){
-  const cells=getCells(row);
-  if(cells.length<10)continue;
-  let heading='';
-  let node=row;
-  for(let i=0;i<8&&node;i++,node=node.parentElement){
-    const s=(node.innerText||'').slice(0,700);
-    const m=s.match(/([^\n]{2,70}(?:Skaters|Goalies))/i);
-    if(m){heading=m[1];break}
-  }
-  if(!tables.some(t=>t.rows.some(r=>r.join('|')===cells.join('|')))){
-    tables.push({heading,rows:[cells]});
-  }
-}
+const tables=[...grouped.values()];
 const links=[...document.querySelectorAll('a[href*="/games/"]')].map(a=>{
  let node=a,context='';
  for(let i=0;i<12&&node;i++,node=node.parentElement){
@@ -189,8 +193,20 @@ async def get_page(browser,url,wait_for_games=False):
             except Exception:
                 await page.wait_for_timeout(5000)
         else:
-            try: await page.wait_for_function("document.body && /\\bFINAL\\b/i.test(document.body.innerText)",timeout=15000)
-            except Exception: await page.wait_for_timeout(3500)
+            try: await page.wait_for_function("document.body && /\\bFINAL(?:\\s*\\/\\s*(?:OT|SO))?\\b/i.test(document.body.innerText)",timeout=15000)
+            except Exception: await page.wait_for_timeout(2500)
+            # PlayCHL renders the scoreboard first and hydrates skater/goalie panels afterward.
+            try:
+                await page.wait_for_function("""() => {
+                    const t=document.body?.innerText||'';
+                    const hasSections=/skaters/i.test(t)||/goalies/i.test(t);
+                    const hasRows=document.querySelectorAll('tr,[role="row"],[class*="row"],[class*="Row"],[class*="grid"],[class*="flex"]').length>=8;
+                    const hasStars=/1st Star/i.test(t)&&/2nd Star/i.test(t);
+                    return (hasSections&&hasRows)||hasStars;
+                }""",timeout=10000)
+            except Exception:
+                LOG.debug("Player/goalie panels did not become detectable before timeout: %s",url)
+            await page.wait_for_timeout(1200)
         return await page.evaluate(EXTRACT_JS)
     finally:await page.close()
 
@@ -259,21 +275,33 @@ async def fetch_playchl_games(limit=10,include_id=None,team_name=None):
             async def fetch_one(entry):
                 gid=entry["id"]
                 async with semaphore:
-                    try:
-                        snap=await get_page(browser,f"{BASE}/games/{gid}")
-                        game=parse_snapshot(snap,gid)
-                        if game and not game.get("date") and entry.get("date_text"):
-                            game["date"]=entry["date_text"]
-                        if game and team_name:
-                            names=[str(game.get(side,{}).get("name","")).casefold() for side in ("home","away")]
-                            is_target=any(("washington" in name or "capitals" in name or name.strip()=="wsh") for name in names)
-                            if not is_target:
-                                LOG.info("Skipping non-%s game %s: %s",team_name,gid,names)
-                                return None
-                        return game
-                    except Exception:
-                        LOG.exception("Unable to parse PlayCHL game %s",gid)
-                        return None
+                    best=None
+                    best_quality=-1
+                    for attempt in range(1,3):
+                        try:
+                            snap=await get_page(browser,f"{BASE}/games/{gid}")
+                            game=parse_snapshot(snap,gid)
+                            if game and not game.get("date") and entry.get("date_text"):
+                                game["date"]=entry["date_text"]
+                            if game and team_name:
+                                names=[str(game.get(side,{}).get("name","")).casefold() for side in ("home","away")]
+                                is_target=any(("washington" in name or "capitals" in name or name.strip()=="wsh") for name in names)
+                                if not is_target:
+                                    LOG.info("Skipping non-%s game %s: %s",team_name,gid,names)
+                                    return None
+                            if game:
+                                quality=len(game.get("players") or [])*10+len(game.get("official_stars") or [])*100
+                                if quality>best_quality:
+                                    best,best_quality=game,quality
+                                if game.get("boxscore_complete"):
+                                    return game
+                            if attempt<2 and (not game or not game.get("boxscore_complete")):
+                                LOG.info("Retrying incomplete PlayCHL game %s (attempt %s/2)",gid,attempt+1)
+                                await asyncio.sleep(2)
+                        except Exception:
+                            LOG.exception("Unable to parse PlayCHL game %s (attempt %s)",gid,attempt)
+                            if attempt<2:await asyncio.sleep(2)
+                    return best
             fetched=await asyncio.gather(*(fetch_one(entry) for entry in candidates))
             results.extend(game for game in fetched if game)
         finally:
