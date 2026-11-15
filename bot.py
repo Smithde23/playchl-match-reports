@@ -312,7 +312,7 @@ async def matchhistory(interaction:discord.Interaction):
     saved=[(json.loads(payload),posted) for payload,posted in rows]
     saved=[item for item in saved if is_target_game(item[0])]
     saved.sort(key=lambda item:game_date_key(item[0]),reverse=True)
-    lines=[f"`{game['id']}` • {summary(game)} • {'Posted' if posted and posted != 'baseline' else 'Saved'}" for game,posted in saved[:10]]
+    lines=[f"`{game['id']}` • {game.get('date','Date unavailable')} • {summary(game)} • {'Posted' if posted and posted != 'baseline' else 'Saved'}" for game,posted in saved[:10]]
     await interaction.response.send_message('\n'.join(lines)[:1900] if lines else 'No match reports imported yet.',ephemeral=True)
 
 @bot.tree.command(name='matchrepost',description='Admin: post a saved report again')
