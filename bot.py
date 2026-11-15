@@ -27,7 +27,7 @@ CHANNEL_ID=int(os.getenv('REPORT_CHANNEL_ID','0'))
 FEED_URL=os.getenv('GAME_FEED_URL','').strip()
 FEED_TOKEN=os.getenv('GAME_FEED_TOKEN','').strip()
 PLAYCHL_PUBLIC=os.getenv('PLAYCHL_PUBLIC','1')=='1'
-PLAYCHL_LOOKBACK=max(1,min(100,int(os.getenv('PLAYCHL_LOOKBACK','50'))))
+PLAYCHL_LOOKBACK=max(1,min(100,int(os.getenv('PLAYCHL_LOOKBACK','10'))))
 TARGET_TEAM_NAME=os.getenv('TARGET_TEAM_NAME','Washington Capitals').strip() or 'Washington Capitals'
 DB_PATH=Path(os.getenv('DATABASE_PATH','/data/matchreports.sqlite3'))
 POLL_MINUTES=max(2,int(os.getenv('POLL_MINUTES','5')))
@@ -40,6 +40,20 @@ def is_target_game(game):
         if name and (target in name or name in ('wsh','capitals','washingtoncapitals')):
             return True
     return False
+
+def game_date_key(game):
+    value=str(game.get('date') or '')
+    for fmt in ('%b %d, %Y, %I:%M %p','%b %d, %Y','%m/%d/%Y %I:%M %p','%m/%d/%Y','%Y-%m-%d'):
+        try:
+            parsed=datetime.strptime(value,fmt)
+            return parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    try:
+        parsed=datetime.fromisoformat(value.replace('Z','+00:00'))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
 
 def db():
     DB_PATH.parent.mkdir(parents=True,exist_ok=True)
@@ -234,14 +248,12 @@ async def latestreport(interaction:discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     with db() as conn:
         rows=conn.execute(
-            "SELECT payload FROM reports WHERE id != '__playchl_baseline__' ORDER BY rowid DESC LIMIT 100"
+            "SELECT payload FROM reports WHERE id != '__playchl_baseline__'"
         ).fetchall()
-    game=None
-    for (payload,) in rows:
-        candidate=json.loads(payload)
-        if is_target_game(candidate):
-            game=candidate
-            break
+    saved=[json.loads(payload) for (payload,) in rows]
+    saved=[candidate for candidate in saved if is_target_game(candidate)]
+    saved.sort(key=game_date_key,reverse=True)
+    game=saved[0] if saved else None
     if not game:
         return await interaction.followup.send(
             f"No saved {TARGET_TEAM_NAME} match report was found yet. The next completed game will appear here after it is imported.",
@@ -296,8 +308,11 @@ async def matchstats(interaction:discord.Interaction,game_id:str):
 
 @bot.tree.command(name='matchhistory',description='Show recent imported games')
 async def matchhistory(interaction:discord.Interaction):
-    with db() as c:rows=c.execute("SELECT payload,posted_at FROM reports WHERE id != '__playchl_baseline__' ORDER BY COALESCE(posted_at, '') DESC LIMIT 15").fetchall()
-    lines=[f"`{json.loads(p)['id']}` • {summary(json.loads(p))} • {'Posted' if posted else 'Not posted'}" for p,posted in rows if is_target_game(json.loads(p))]
+    with db() as c:rows=c.execute("SELECT payload,posted_at FROM reports WHERE id != '__playchl_baseline__'").fetchall()
+    saved=[(json.loads(payload),posted) for payload,posted in rows]
+    saved=[item for item in saved if is_target_game(item[0])]
+    saved.sort(key=lambda item:game_date_key(item[0]),reverse=True)
+    lines=[f"`{game['id']}` • {summary(game)} • {'Posted' if posted and posted != 'baseline' else 'Saved'}" for game,posted in saved[:10]]
     await interaction.response.send_message('\n'.join(lines)[:1900] if lines else 'No match reports imported yet.',ephemeral=True)
 
 @bot.tree.command(name='matchrepost',description='Admin: post a saved report again')
