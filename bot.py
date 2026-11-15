@@ -84,6 +84,7 @@ def report_embed(game):
     em.add_field(name='🥉 3rd Star',value='Not available',inline=True)
     for i,p in enumerate(three_stars(game)):
         em.set_field_at(i,name=('🥇 1st Star','🥈 2nd Star','🥉 3rd Star')[i],value=f"**{p['name']}** ({p['team']})\n{stat_line(p)}",inline=True)
+    if game.get('date'):em.add_field(name='Game Date',value=str(game['date']),inline=True)
     em.add_field(name='Game ID',value=str(game['id']),inline=True)
     if game.get('source_url'):
         u=str(game['source_url'])
