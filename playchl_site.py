@@ -169,7 +169,7 @@ const links=[...document.querySelectorAll('a[href*="/games/"]')].map(a=>{
  for(let i=0;i<8&&node;i++,node=node.parentElement){
    const alts=[...node.querySelectorAll('img')].map(img=>img.alt||'').join(' ');
    const candidate=((node.innerText||'')+' '+alts).trim();
-   if(/Washington|Capitals|\\bWSH\\b/i.test(candidate)&&candidate.length<1600){context=candidate;break}
+   if(/Washington|Capitals|\bWSH\b/i.test(candidate)&&candidate.length<1600){context=candidate;break}
  }
  return {href:a.getAttribute('href'),text:(a.innerText||'').trim(),context};
 });
@@ -198,7 +198,7 @@ async def fetch_playchl_games(limit=25,include_id=None,team_name=None):
                 if m and m.group(1) not in ids:
                     ids.append(m.group(1))
                     context=(link.get("context","")+" "+link.get("text","")).casefold()
-                    if team_name and ("washington" in context or "capitals" in context or re.search(r"\\bwsh\\b",context)):
+                    if team_name and ("washington" in context or "capitals" in context or re.search(r"\bwsh\b",context)):
                         matching_ids.append(m.group(1))
             if include_id:ids=[include_id]
             elif team_name:ids=(matching_ids or ids[-limit:])[-limit:]
