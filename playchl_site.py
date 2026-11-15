@@ -249,7 +249,7 @@ async def fetch_playchl_games(limit=10,include_id=None,team_name=None):
                     candidates=entries
                 candidates.sort(key=lambda entry:entry["date"],reverse=True)
                 # Check a larger candidate window, then select the newest complete final games.
-                candidate_limit=max(limit*5,50) if team_name else max(limit*5,50)
+                candidate_limit=max(limit*10,100)
                 candidates=candidates[:candidate_limit]
             LOG.info("PlayCHL schedule discovered %s unique game links; %s team cards matched; checking %s candidates for newest %s complete games",
                      len(entries),sum(1 for entry in entries if entry["is_team"]),len(candidates),limit)
