@@ -437,6 +437,102 @@ async def show_postall_confirmation(interaction:discord.Interaction):
         f"Select **Confirm** to publish them all.",
         view=PostAllConfirmView(interaction.user.id),ephemeral=True)
 
+clear_channel_lock=asyncio.Lock()
+
+class ClearAnyChannelModal(discord.ui.Modal):
+    confirmation=discord.ui.TextInput(
+        label="Type DELETE ALL to confirm",placeholder="DELETE ALL",
+        required=True,min_length=10,max_length=20)
+
+    def __init__(self,requester_id,channel_id,channel_name,bot_only=False):
+        super().__init__(title="Clear Discord channel messages",timeout=180)
+        self.requester_id=requester_id
+        self.channel_id=channel_id
+        self.channel_name=channel_name
+        self.bot_only=bot_only
+        if bot_only:
+            self.confirmation.label="Type DELETE BOT to confirm"
+            self.confirmation.placeholder="DELETE BOT"
+
+    async def on_submit(self,interaction:discord.Interaction):
+        required="DELETE BOT" if self.bot_only else "DELETE ALL"
+        if str(self.confirmation.value).strip().upper()!=required:
+            return await interaction.response.send_message("Confirmation did not match. No messages were deleted.",ephemeral=True)
+        if not interaction.guild or interaction.user.id!=self.requester_id:
+            return await interaction.response.send_message("This confirmation is not valid for your account.",ephemeral=True)
+        if not (interaction.user.guild_permissions.manage_guild and interaction.user.guild_permissions.manage_messages):
+            return await interaction.response.send_message("Manage Server and Manage Messages permissions are required.",ephemeral=True)
+        if clear_channel_lock.locked() or postall_lock.locked():
+            return await interaction.response.send_message("A bulk operation is already running. Try again when it finishes.",ephemeral=True)
+        channel=interaction.guild.get_channel(self.channel_id)
+        if not isinstance(channel,discord.TextChannel):
+            return await interaction.response.send_message("This text channel is no longer available. Nothing was deleted.",ephemeral=True)
+        user_perms=channel.permissions_for(interaction.user)
+        if not user_perms.manage_messages:
+            return await interaction.response.send_message("You need Manage Messages permission in this channel.",ephemeral=True)
+        me=interaction.guild.me or channel.guild.get_member(bot.user.id)
+        if me is None:
+            me=await interaction.guild.fetch_member(bot.user.id)
+        permissions=channel.permissions_for(me)
+        if not (permissions.view_channel and permissions.read_message_history and permissions.manage_messages):
+            return await interaction.response.send_message(
+                "The bot requires View Channel, Read Message History, and Manage Messages permission in this channel.",ephemeral=True)
+        await interaction.response.defer(ephemeral=True,thinking=True)
+        count=0
+        failed=0
+        try:
+            async with clear_channel_lock:
+                # Delete individually so even messages older than two weeks can be cleared.
+                # Operate only on the explicitly confirmed channel, never across the server.
+                async for message in channel.history(limit=None,oldest_first=False):
+                    if self.bot_only and message.author.id!=bot.user.id:
+                        continue
+                    try:
+                        await message.delete()
+                        count+=1
+                        # Update report history only when the deleted message actually
+                        # belongs to a stored match report; retain all game statistics.
+                        with db() as conn:
+                            conn.execute(
+                                "UPDATE reports SET posted_at=NULL,message_id=NULL,channel_id=NULL "
+                                "WHERE channel_id=? AND message_id=?",
+                                (str(channel.id),str(message.id)))
+                    except discord.NotFound:
+                        continue
+                    except discord.Forbidden:
+                        failed+=1
+                        log.exception("Missing permission during channel clear in %s",channel.id)
+                        break
+                    except discord.HTTPException:
+                        failed+=1
+                        log.exception("Failed to delete message in channel %s",channel.id)
+                await interaction.followup.send(
+                    f"**Channel cleanup complete:** <#{channel.id}>\n"
+                    f"Deleted **{count}** message(s). Errors: **{failed}**. "
+                    f"Mode: **{'bot posts only' if self.bot_only else 'all messages'}**.\n"
+                    "Saved match statistics remain available. "
+                    "Deleted match reports can be posted again using the postall command.",
+                    ephemeral=True)
+        except Exception:
+            log.exception("Clear channel operation failed in channel %s",self.channel_id)
+            await interaction.followup.send(
+                f"Channel cleanup stopped after deleting {count} message(s). "
+                "Check Railway logs; deleted messages cannot be recovered.",
+                ephemeral=True)
+
+@bot.tree.command(name='clearchannel',description='Admin: delete messages in the current Discord text channel after confirmation')
+@app_commands.describe(bot_only='True: delete only this bot’s messages; False: delete EVERY message in this channel')
+@app_commands.checks.has_permissions(manage_guild=True,manage_messages=True)
+async def clearchannel_command(interaction:discord.Interaction,bot_only:bool=False):
+    if not interaction.guild or not isinstance(interaction.channel,discord.TextChannel):
+        return await interaction.response.send_message("Run this command inside the text channel you want to clear.",ephemeral=True)
+    if clear_channel_lock.locked() or postall_lock.locked():
+        return await interaction.response.send_message("Another bulk report operation is running.",ephemeral=True)
+    if not interaction.channel.permissions_for(interaction.user).manage_messages:
+        return await interaction.response.send_message("You cannot manage messages in this channel.",ephemeral=True)
+    await interaction.response.send_modal(
+        ClearAnyChannelModal(interaction.user.id,interaction.channel.id,interaction.channel.name,bot_only=bot_only))
+
 @bot.tree.command(name='postall',description='Admin: confirm posting every saved but unposted Capitals match report publicly')
 @app_commands.checks.has_permissions(manage_guild=True)
 async def postall_command(interaction:discord.Interaction):
