@@ -169,7 +169,8 @@ def report_quality(game):
     team_stats=sum(len(v or {}) for v in (game.get('team_stats') or {}).values())
     return players*10+stars*100+team_stats
 
-async def publish(game,force=False):
+async def publish(game,force=False,replace_existing=False):
+    """Publish one card. replace_existing refreshes an old post without duplicates."""
     validate(game)
     if not is_target_game(game):
         raise ValueError(f'This bot only publishes {TARGET_TEAM_NAME} games.')
@@ -186,25 +187,33 @@ async def publish(game,force=False):
         saved_channel_id=row[3] if row else None
         old_quality=report_quality(old_game) if old_game else -1
         new_quality=report_quality(game)
+        # Never overwrite a detailed saved box score with a later partial scrape.
+        if old_game and old_quality>new_quality:
+            game=old_game
+            new_quality=old_quality
         store(game)
 
-        # Existing reports are edited in place when a later scrape finds richer stats.
-        # Historical baseline entries are saved only; they must never be posted retroactively.
         if posted and not force:
             if posted=='baseline' or not message_id:
+                if not replace_existing:
+                    return False
+            elif not replace_existing and new_quality<=old_quality:
                 return False
-            if new_quality<=old_quality:
-                return False
-            try:
-                ch=bot.get_channel(int(saved_channel_id or CHANNEL_ID)) or await bot.fetch_channel(int(saved_channel_id or CHANNEL_ID))
-                msg=await ch.fetch_message(int(message_id))
-                safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
-                graphic=discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")
-                await msg.edit(embed=report_embed(game),attachments=[graphic])
-                log.info("Enriched existing match report %s: quality %s -> %s",game['id'],old_quality,new_quality)
-            except Exception:
-                log.exception("Could not update existing Discord report for enriched game %s",game['id'])
-            return False
+            else:
+                try:
+                    ch=bot.get_channel(int(saved_channel_id or CHANNEL_ID)) or await bot.fetch_channel(int(saved_channel_id or CHANNEL_ID))
+                    msg=await ch.fetch_message(int(message_id))
+                    safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
+                    graphic=discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")
+                    await msg.edit(embed=report_embed(game),attachments=[graphic])
+                    log.info("Refreshed existing match report %s (quality %s -> %s)",game['id'],old_quality,new_quality)
+                    return True if replace_existing else False
+                except discord.NotFound:
+                    # The old post was deleted (e.g. /clearchannel); publish a new one.
+                    log.info("Previously tracked Discord message for %s no longer exists; reposting",game['id'])
+                except Exception:
+                    log.exception("Could not edit existing Discord report for game %s",game['id'])
+                    raise
 
         ch=bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
         safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
