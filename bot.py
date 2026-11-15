@@ -103,8 +103,8 @@ async def poll_games():
                 initialized=conn.execute("SELECT 1 FROM reports WHERE id='__playchl_baseline__'").fetchone()
                 if not initialized:
                     for g in games:
-                        store(g)
-                        conn.execute('UPDATE reports SET posted_at=? WHERE id=?',('baseline',str(g['id'])))
+                        validate(g)
+                        conn.execute('INSERT INTO reports(id,payload,posted_at) VALUES (?,?,?) ON CONFLICT(id) DO NOTHING',(str(g['id']),json.dumps(g),'baseline'))
                     conn.execute("INSERT INTO reports(id,payload,posted_at) VALUES (?,?,?)",('__playchl_baseline__','{}','baseline'))
                     log.info('Recorded %d historical PlayCHL games without posting',len(games))
                     return
@@ -182,7 +182,7 @@ async def matchstats(interaction:discord.Interaction,game_id:str):
 
 @bot.tree.command(name='matchhistory',description='Show recent imported games')
 async def matchhistory(interaction:discord.Interaction):
-    with db() as c:rows=c.execute('SELECT payload,posted_at FROM reports ORDER BY COALESCE(posted_at, "") DESC LIMIT 15').fetchall()
+    with db() as c:rows=c.execute('SELECT payload,posted_at FROM reports WHERE id != '__playchl_baseline__' ORDER BY COALESCE(posted_at, "") DESC LIMIT 15').fetchall()
     lines=[f"`{json.loads(p)['id']}` • {summary(json.loads(p))} • {'Posted' if posted else 'Not posted'}" for p,posted in rows]
     await interaction.response.send_message('\n'.join(lines)[:1900] if lines else 'No match reports imported yet.',ephemeral=True)
 
