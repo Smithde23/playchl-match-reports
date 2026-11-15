@@ -46,6 +46,12 @@ def player_score(p:dict, winner: str) -> float:
 def three_stars(game: dict) -> list[dict]:
     validate(game)
     if game.get('forfeit'): return []
+    if len(game.get('official_stars') or []) == 3:
+        result=[]
+        for s in game['official_stars']:
+            p=next((x for x in game.get('players',[]) if x['name'].casefold()==s['name'].casefold()),None)
+            result.append({**(p or {'team':'PlayCHL','position':s.get('position','')}),**s,'official':True})
+        return result
     players=game.get('players') or []
     if not players: return []
     h,a=game['home'],game['away']
@@ -60,6 +66,7 @@ def three_stars(game: dict) -> list[dict]:
     return result
 
 def stat_line(p:dict) -> str:
+    if p.get('official') and p.get('stat_line'): return p['stat_line']
     if str(p.get('position','')).upper() in ('G','GOL','GOALIE'):
         return f"{label(p.get('saves'))} SV · {label(p.get('shots_against'))} SA · {label(p.get('save_pct'))} SV%"
     return f"{label(p.get('goals'))} G · {label(p.get('assists'))} A · {label(p.get('points',int(num(p.get('goals'))+num(p.get('assists')))))} PTS"
@@ -121,5 +128,5 @@ def render_card(game:dict)->bytes:
         if i<len(away_players):txt(62,yy,compact(away_players[i]),16,white)
         if i<len(home_players):txt(635,yy,compact(home_players[i]),16,white)
     txt(45,height-75,'FULL PLAYER STATS: use /matchstats or attached CSV export',18,muted)
-    txt(45,height-43,'Only supplied box-score fields are displayed. Stars are algorithmically selected.',16,muted)
+    txt(45,height-43,'Only supplied stats shown. Stars: PlayCHL official when available.',16,muted)
     buffer=io.BytesIO();im.save(buffer,format='PNG');return buffer.getvalue()
