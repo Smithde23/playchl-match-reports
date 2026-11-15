@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime,timezone
 from pathlib import Path
@@ -25,10 +26,19 @@ CHANNEL_ID=int(os.getenv('REPORT_CHANNEL_ID','0'))
 FEED_URL=os.getenv('GAME_FEED_URL','').strip()
 FEED_TOKEN=os.getenv('GAME_FEED_TOKEN','').strip()
 PLAYCHL_PUBLIC=os.getenv('PLAYCHL_PUBLIC','1')=='1'
-PLAYCHL_LOOKBACK=max(1,min(50,int(os.getenv('PLAYCHL_LOOKBACK','12'))))
+PLAYCHL_LOOKBACK=max(1,min(100,int(os.getenv('PLAYCHL_LOOKBACK','50'))))
+TARGET_TEAM_NAME=os.getenv('TARGET_TEAM_NAME','Washington Capitals').strip() or 'Washington Capitals'
 DB_PATH=Path(os.getenv('DATABASE_PATH','/data/matchreports.sqlite3'))
 POLL_MINUTES=max(2,int(os.getenv('POLL_MINUTES','5')))
 MAX_FEED_GAMES=500
+
+def is_target_game(game):
+    target=re.sub(r'[^a-z0-9]','',TARGET_TEAM_NAME.casefold())
+    for side in ('home','away'):
+        name=re.sub(r'[^a-z0-9]','',str(game.get(side,{}).get('name','')).casefold())
+        if name and (target in name or name in ('wsh','capitals','washingtoncapitals')):
+            return True
+    return False
 
 def db():
     DB_PATH.parent.mkdir(parents=True,exist_ok=True)
@@ -39,6 +49,8 @@ def db():
 
 def store(game):
     validate(game)
+    if not is_target_game(game):
+        raise ValueError(f'This bot only stores {TARGET_TEAM_NAME} games.')
     with db() as c:
         c.execute('INSERT INTO reports(id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload', (str(game['id']),json.dumps(game)))
 
@@ -67,6 +79,8 @@ post_lock=asyncio.Lock()
 
 async def publish(game,force=False):
     validate(game)
+    if not is_target_game(game):
+        raise ValueError(f'This bot only publishes {TARGET_TEAM_NAME} games.')
     store(game)
     if not CHANNEL_ID:raise RuntimeError('REPORT_CHANNEL_ID is not set')
     async with post_lock:
@@ -81,7 +95,8 @@ async def publish(game,force=False):
 
 async def fetch_feed():
     if not FEED_URL:
-        return await fetch_playchl_games(limit=PLAYCHL_LOOKBACK) if PLAYCHL_PUBLIC else []
+        games=await fetch_playchl_games(limit=PLAYCHL_LOOKBACK,team_name=TARGET_TEAM_NAME) if PLAYCHL_PUBLIC else []
+        return [g for g in games if is_target_game(g)]
     if urlparse(FEED_URL).scheme != 'https':raise ValueError('Feed URL must use HTTPS')
     headers={'Authorization':f'Bearer {FEED_TOKEN}'} if FEED_TOKEN else {}
     timeout=aiohttp.ClientTimeout(total=25)
@@ -90,7 +105,7 @@ async def fetch_feed():
             resp.raise_for_status(); data=await resp.json(content_type=None)
     if isinstance(data,dict):data=data.get('games',[])
     if not isinstance(data,list):raise ValueError('Feed must return a list or {"games": [...]}')
-    return data[:MAX_FEED_GAMES]
+    return [g for g in data[:MAX_FEED_GAMES] if is_target_game(g)]
 
 @tasks.loop(minutes=POLL_MINUTES)
 async def poll_games():
@@ -138,6 +153,7 @@ async def matchreport(interaction:discord.Interaction,game_id:str):
     await interaction.response.defer(ephemeral=True)
     game,_=load(game_id)
     if not game:return await interaction.followup.send('Game not found. Import its box-score JSON first.',ephemeral=True)
+    if not is_target_game(game):return await interaction.followup.send(f'This bot is configured for {TARGET_TEAM_NAME} games only.',ephemeral=True)
     await interaction.followup.send(embed=report_embed(game),file=discord.File(io.BytesIO(render_card(game)),filename='report.png'),ephemeral=True)
 
 @bot.tree.command(name='matchimport',description='Admin: import final game stats from a JSON attachment and publish')
@@ -153,7 +169,7 @@ async def matchimport(interaction:discord.Interaction,file:discord.Attachment,pu
         await interaction.followup.send(f"Imported game **{game['id']}**. "+('Posted to match-report channel.' if published else 'Saved (or already posted).'),ephemeral=True)
     except Exception as e:await interaction.followup.send(f'Import failed: {e}',ephemeral=True)
 
-@bot.tree.command(name='matchfetch',description='Admin: retrieve one public PlayCHL game and publish its complete report')
+@bot.tree.command(name='matchfetch',description='Admin: retrieve a Washington Capitals game and publish its complete report')
 @app_commands.checks.has_permissions(manage_guild=True)
 async def matchfetch(interaction:discord.Interaction,game_id:str,publish_now:bool=True):
     await interaction.response.defer(ephemeral=True)
@@ -161,8 +177,8 @@ async def matchfetch(interaction:discord.Interaction,game_id:str,publish_now:boo
     if not re.fullmatch(r'[0-9a-fA-F]{24}',game_id):
         return await interaction.followup.send('Use the 24-character PlayCHL game ID from the game URL.',ephemeral=True)
     try:
-        games=await fetch_playchl_games(include_id=game_id)
-        if not games:return await interaction.followup.send('No complete final box score was extracted. Check Railway logs; nothing was posted.',ephemeral=True)
+        games=await fetch_playchl_games(include_id=game_id,team_name=TARGET_TEAM_NAME)
+        if not games:return await interaction.followup.send(f'No complete {TARGET_TEAM_NAME} box score was extracted for that ID. Non-Capitals games are ignored; nothing was posted.',ephemeral=True)
         game=games[0];store(game)
         posted=await publish(game) if publish_now else False
         await interaction.followup.send(('Posted.' if posted else 'Saved; already published or publish_now disabled.')+f' {summary(game)}',ephemeral=True)
@@ -185,7 +201,7 @@ async def matchstats(interaction:discord.Interaction,game_id:str):
 @bot.tree.command(name='matchhistory',description='Show recent imported games')
 async def matchhistory(interaction:discord.Interaction):
     with db() as c:rows=c.execute("SELECT payload,posted_at FROM reports WHERE id != '__playchl_baseline__' ORDER BY COALESCE(posted_at, '') DESC LIMIT 15").fetchall()
-    lines=[f"`{json.loads(p)['id']}` • {summary(json.loads(p))} • {'Posted' if posted else 'Not posted'}" for p,posted in rows]
+    lines=[f"`{json.loads(p)['id']}` • {summary(json.loads(p))} • {'Posted' if posted else 'Not posted'}" for p,posted in rows if is_target_game(json.loads(p))]
     await interaction.response.send_message('\n'.join(lines)[:1900] if lines else 'No match reports imported yet.',ephemeral=True)
 
 @bot.tree.command(name='matchrepost',description='Admin: post a saved report again')
@@ -194,6 +210,7 @@ async def matchrepost(interaction:discord.Interaction,game_id:str):
     await interaction.response.defer(ephemeral=True)
     game,_=load(game_id)
     if not game:return await interaction.followup.send('Game not found.',ephemeral=True)
+    if not is_target_game(game):return await interaction.followup.send(f'This bot is configured for {TARGET_TEAM_NAME} games only.',ephemeral=True)
     await publish(game,force=True)
     await interaction.followup.send('Match report posted again.',ephemeral=True)
 
