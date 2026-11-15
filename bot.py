@@ -182,7 +182,7 @@ async def matchstats(interaction:discord.Interaction,game_id:str):
 
 @bot.tree.command(name='matchhistory',description='Show recent imported games')
 async def matchhistory(interaction:discord.Interaction):
-    with db() as c:rows=c.execute('SELECT payload,posted_at FROM reports WHERE id != '__playchl_baseline__' ORDER BY COALESCE(posted_at, "") DESC LIMIT 15').fetchall()
+    with db() as c:rows=c.execute("SELECT payload,posted_at FROM reports WHERE id != '__playchl_baseline__' ORDER BY COALESCE(posted_at, '') DESC LIMIT 15").fetchall()
     lines=[f"`{json.loads(p)['id']}` • {summary(json.loads(p))} • {'Posted' if posted else 'Not posted'}" for p,posted in rows]
     await interaction.response.send_message('\n'.join(lines)[:1900] if lines else 'No match reports imported yet.',ephemeral=True)
 
