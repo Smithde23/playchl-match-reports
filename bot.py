@@ -78,19 +78,58 @@ def build_boxscore_csv(game):
     return buf.getvalue().encode('utf-8')
 
 def report_embed(game):
-    em=discord.Embed(title='🏒 PLAYCHL • FINAL MATCH REPORT',description=f'**{summary(game)}**',color=0x2EA8DF)
-    em.add_field(name='🥇 1st Star',value='Not available',inline=True)
-    em.add_field(name='🥈 2nd Star',value='Not available',inline=True)
-    em.add_field(name='🥉 3rd Star',value='Not available',inline=True)
-    for i,p in enumerate(three_stars(game)):
-        em.set_field_at(i,name=('🥇 1st Star','🥈 2nd Star','🥉 3rd Star')[i],value=f"**{p['name']}** ({p['team']})\n{stat_line(p)}",inline=True)
-    if game.get('date'):em.add_field(name='Game Date',value=str(game['date']),inline=True)
-    em.add_field(name='Game ID',value=str(game['id']),inline=True)
+    away,home=game['away'],game['home']
+    em=discord.Embed(title='🏒 PLAYCHL • OFFICIAL MATCH REPORT',
+        description=f"**{away['name']} {away['score']} — {home['name']} {home['score']} (FINAL)**",
+        color=0x2EA8DF)
+    capitals_side=next((side for side in ('away','home')
+        if 'washington' in game[side]['name'].casefold() or 'capitals' in game[side]['name'].casefold()),None)
+    if capitals_side:
+        other='home' if capitals_side=='away' else 'away'
+        result='WIN' if game[capitals_side]['score']>game[other]['score'] else 'LOSS' if game[capitals_side]['score']<game[other]['score'] else 'TIE'
+        em.add_field(name='Result',value=f"**{result}** · {game.get('date','Date unavailable')}",inline=False)
+    elif game.get('date'):
+        em.add_field(name='Game date',value=str(game['date']),inline=False)
+    stars=three_stars(game)
+    if stars:
+        labels=('🥇 1st Star','🥈 2nd Star','🥉 3rd Star')
+        for i,p in enumerate(stars[:3]):
+            em.add_field(name=labels[i],value=f"**{p['name']}** ({p.get('team','')})\n{stat_line(p)}",inline=True)
+    team_stats=game.get('team_stats') or {}
+    stat_labels=[('Shots','shots'),('Hits','hits'),('Faceoffs %','faceoff_pct'),
+        ('Power-play goals','power_play_goals'),('Penalty minutes','penalty_minutes'),
+        ('Blocks','blocks'),('Takeaways','takeaways'),('Giveaways','giveaways'),
+        ('Interceptions','interceptions'),('Time on attack','time_on_attack')]
+    for side in ('away','home'):
+        values=team_stats.get(side,{})
+        lines=[f"**{label}:** {values[key]}" for label,key in stat_labels if values.get(key) is not None]
+        if lines:
+            em.add_field(name=f"📊 {game[side]['name']} — Team Stats",value='\n'.join(lines)[:1024],inline=True)
+    players=game.get('players') or []
+    for side in ('away','home'):
+        team=game[side]['name']
+        roster=[p for p in players if p.get('team')==team]
+        skaters=[p for p in roster if str(p.get('position','')).upper() not in ('G','GOL','GOALIE')]
+        goalies=[p for p in roster if str(p.get('position','')).upper() in ('G','GOL','GOALIE')]
+        if skaters:
+            lines=[]
+            for p in skaters:
+                pts=p.get('points',num(p.get('goals'))+num(p.get('assists')))
+                lines.append(f"**{p['name']}** · G {label(p.get('goals'))} · A {label(p.get('assists'))} · P {label(pts)} · S {label(p.get('shots'))} · H {label(p.get('hits'))}")
+            for chunk_no in range(0,len(lines),8):
+                em.add_field(name=f"🏒 {team} — Player Statistics"+(f" ({chunk_no//8+1})" if len(lines)>8 else ""),
+                    value='\n'.join(lines[chunk_no:chunk_no+8])[:1024],inline=False)
+        if goalies:
+            goalie_lines=[f"**{p['name']}** · Saves: {label(p.get('saves'))} · SA: {label(p.get('shots_against'))} · GA: {label(p.get('goals_against'))} · SV%: {label(p.get('save_pct'))}"
+                for p in goalies]
+            em.add_field(name=f"🥅 {team} — Goalie Statistics",value='\n'.join(goalie_lines)[:1024],inline=False)
+    em.add_field(name='Game ID',value=str(game['id']),inline=False)
     if game.get('source_url'):
         u=str(game['source_url'])
         if urlparse(u).scheme in ('https','http'):em.url=u
-    em.set_footer(text='Full player box score attached as CSV' if game.get('players') else 'Player box score unavailable')
+    em.set_footer(text='Graphic and full player-stat CSV attached to this match report.')
     return em
+
 
 intents=discord.Intents.default()
 bot=commands.Bot(command_prefix='!',intents=intents)
@@ -135,6 +174,7 @@ async def poll_games():
     if not FEED_URL and not PLAYCHL_PUBLIC:return
     try:
         games=await fetch_feed()
+        log.info('Automatic poll found %d complete %s games',len(games),TARGET_TEAM_NAME)
         # First successful discovery creates a baseline; never dump old games into Discord.
         if PLAYCHL_PUBLIC and not FEED_URL and games:
             with db() as conn:
