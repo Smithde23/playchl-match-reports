@@ -26,8 +26,9 @@ def intval(v):
     except (ValueError, TypeError): return 0
 
 def clean_name(s):
-    s = re.sub(r"^\s*\d{1,3}\.\d\s*", "", str(s or ""))
-    return s.strip()
+    lines = [x.strip() for x in str(s or "").splitlines() if x.strip()]
+    lines = [x for x in lines if not re.fullmatch(r"\d{1,3}\.\d|Xbox|PlayStation|PC",x,re.I)]
+    return lines[-1] if lines else ""
 
 def parse_snapshot(snap, game_id):
     """Normalize text/tables into existing report JSON. Fail closed on incomplete results."""
