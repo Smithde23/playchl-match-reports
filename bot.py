@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import sqlite3
+import zipfile
 from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -77,6 +78,16 @@ def build_boxscore_csv(game):
     writer.writerows(players)
     return buf.getvalue().encode('utf-8')
 
+def build_boxscore_zip(game):
+    """Package the full CSV as a ZIP so Discord doesn't expand it as a text preview."""
+    csv_bytes=build_boxscore_csv(game)
+    if not csv_bytes:return None
+    safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
+    buffer=io.BytesIO()
+    with zipfile.ZipFile(buffer,'w',compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"boxstats_{safe_id}.csv",csv_bytes)
+    return buffer.getvalue()
+
 def report_embed(game):
     away,home=game['away'],game['home']
     em=discord.Embed(title='🏒 PLAYCHL • OFFICIAL MATCH REPORT',
@@ -127,7 +138,7 @@ def report_embed(game):
     if game.get('source_url'):
         u=str(game['source_url'])
         if urlparse(u).scheme in ('https','http'):em.url=u
-    em.set_footer(text='Graphic and full player-stat CSV attached to this match report.')
+    em.set_footer(text='Graphic and full player-stat CSV ZIP attached to this match report.')
     return em
 
 
@@ -147,9 +158,9 @@ async def publish(game,force=False):
         ch=bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
         safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
         files=[discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")]
-        csv_bytes=build_boxscore_csv(game)
-        if csv_bytes:
-            files.append(discord.File(io.BytesIO(csv_bytes),filename=f"boxstats_{safe_id}.csv"))
+        zip_bytes=build_boxscore_zip(game)
+        if zip_bytes:
+            files.append(discord.File(io.BytesIO(zip_bytes),filename=f"boxstats_{safe_id}.zip"))
         msg=await ch.send(embed=report_embed(game),files=files)
         with db() as c:
             c.execute('UPDATE reports SET posted_at=?,message_id=?,channel_id=? WHERE id=?',(datetime.now(timezone.utc).isoformat(),str(msg.id),str(ch.id),str(game['id'])))
@@ -219,8 +230,8 @@ async def matchreport(interaction:discord.Interaction,game_id:str):
     if not is_target_game(game):return await interaction.followup.send(f'This bot is configured for {TARGET_TEAM_NAME} games only.',ephemeral=True)
     safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
     files=[discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")]
-    csv_bytes=build_boxscore_csv(game)
-    if csv_bytes:files.append(discord.File(io.BytesIO(csv_bytes),filename=f"boxstats_{safe_id}.csv"))
+    zip_bytes=build_boxscore_zip(game)
+    if zip_bytes:files.append(discord.File(io.BytesIO(zip_bytes),filename=f"boxstats_{safe_id}.zip"))
     await interaction.followup.send(embed=report_embed(game),files=files,ephemeral=True)
 
 @bot.tree.command(name='latestreport',description='Show the most recently saved Washington Capitals match report without a game ID')
@@ -287,9 +298,9 @@ async def matchstats(interaction:discord.Interaction,game_id:str):
     if not game:return await interaction.response.send_message('Game ID not found.',ephemeral=True)
     players=game.get('players',[])
     if not players:return await interaction.response.send_message('No individual player box stats for this game.',ephemeral=True)
-    csv_bytes=build_boxscore_csv(game)
-    if not csv_bytes:return await interaction.response.send_message('No individual player box stats for this game.',ephemeral=True)
-    await interaction.response.send_message(file=discord.File(io.BytesIO(csv_bytes),filename=f'boxstats_{game_id[:50]}.csv'),ephemeral=True)
+    zip_bytes=build_boxscore_zip(game)
+    if not zip_bytes:return await interaction.response.send_message('No individual player box stats for this game.',ephemeral=True)
+    await interaction.response.send_message(file=discord.File(io.BytesIO(zip_bytes),filename=f'boxstats_{game_id[:50]}.zip'),ephemeral=True)
 
 @bot.tree.command(name='matchhistory',description='Show recent imported games')
 async def matchhistory(interaction:discord.Interaction):
