@@ -328,6 +328,110 @@ async def setup_hook():
         await bot.tree.sync(guild=guild)
     else:await bot.tree.sync()
 
+def list_saved_games():
+    """All stored Capitals games, newest first; the menu pages through every entry."""
+    with db() as conn:
+        records=conn.execute("SELECT payload FROM reports WHERE id != '__playchl_baseline__'").fetchall()
+    games=[]
+    for (payload,) in records:
+        try:
+            game=json.loads(payload)
+            if is_target_game(game):games.append(game)
+        except (ValueError,TypeError):
+            log.warning("Skipping malformed stored game while building /games menu")
+    games.sort(key=lambda g:(game_date_key(g),str(g.get('id'))),reverse=True)
+    return games
+
+class GameChoiceSelect(discord.ui.Select):
+    def __init__(self,games):
+        options=[]
+        for g in games:
+            date=str(g.get('date') or 'Date unavailable')[:24]
+            away=g.get('away',{})
+            home=g.get('home',{})
+            title=f"{date} • {away.get('name','Away')} {away.get('score','?')}-{home.get('score','?')} {home.get('name','Home')}"
+            options.append(discord.SelectOption(
+                label=title[:100],value=str(g['id']),
+                description=f"PlayCHL game ID: {g['id']}"[:100]))
+        super().__init__(placeholder="Select a game to post its report for everyone",
+                         min_values=1,max_values=1,options=options,row=0)
+
+    async def callback(self,interaction:discord.Interaction):
+        game_id=self.values[0]
+        game,_=load(game_id)
+        if not game or not is_target_game(game):
+            return await interaction.response.send_message("That game is no longer available.",ephemeral=True)
+        await interaction.response.defer(ephemeral=True,thinking=True)
+        try:
+            # Explicit viewer selection posts a public graphic + text report to the
+            # configured report channel, even for previously published games.
+            await publish(game,force=True)
+            with db() as conn:
+                row=conn.execute("SELECT message_id,channel_id FROM reports WHERE id=?",(game_id,)).fetchone()
+            url=(f"https://discord.com/channels/{interaction.guild_id}/{row[1]}/{row[0]}"
+                 if row and row[0] and row[1] and interaction.guild_id else None)
+            await interaction.followup.send(
+                f"Published **{game.get('date','selected game')}** in <#{CHANNEL_ID}> for everyone to see."
+                +(f"\n[View public report]({url})" if url else ""),ephemeral=True)
+        except Exception:
+            log.exception("Public game selection failed for %s",game_id)
+            await interaction.followup.send("Could not post this report; check Railway deploy logs and channel permissions.",ephemeral=True)
+
+class GamePageButton(discord.ui.Button):
+    def __init__(self,direction,disabled=False):
+        super().__init__(label="← Newer games" if direction<0 else "Older games →",
+                         style=discord.ButtonStyle.secondary,disabled=disabled,row=1)
+        self.direction=direction
+
+    async def callback(self,interaction:discord.Interaction):
+        view=self.view
+        if not isinstance(view,GamePickerView):
+            return await interaction.response.send_message("Open /games again.",ephemeral=True)
+        view.page+=self.direction
+        view.populate()
+        await interaction.response.edit_message(content=view.page_caption(),view=view)
+
+class GamePickerView(discord.ui.View):
+    PAGE_SIZE=25
+    def __init__(self,games,owner_id):
+        super().__init__(timeout=300)
+        self.games=games
+        self.owner_id=owner_id
+        self.page=0
+        self.populate()
+
+    async def interaction_check(self,interaction:discord.Interaction):
+        if interaction.user.id!=self.owner_id:
+            await interaction.response.send_message("Open /games to choose a report from your own menu.",ephemeral=True)
+            return False
+        return True
+
+    def populate(self):
+        self.clear_items()
+        pages=max(1,(len(self.games)+self.PAGE_SIZE-1)//self.PAGE_SIZE)
+        self.page=max(0,min(self.page,pages-1))
+        batch=self.games[self.page*self.PAGE_SIZE:(self.page+1)*self.PAGE_SIZE]
+        if batch:self.add_item(GameChoiceSelect(batch))
+        if pages>1:
+            self.add_item(GamePageButton(-1,disabled=self.page==0))
+            self.add_item(GamePageButton(1,disabled=self.page>=pages-1))
+
+    def page_caption(self):
+        pages=max(1,(len(self.games)+self.PAGE_SIZE-1)//self.PAGE_SIZE)
+        return (f"🏒 **{TARGET_TEAM_NAME} — Select a Match Report**\n"
+                f"{len(self.games)} saved games · Page {self.page+1} of {pages}\n"
+                f"Choose a game to generate the graphic and post it publicly in <#{CHANNEL_ID}>.")
+
+@bot.tree.command(name='games',description='Choose any saved Capitals game from a dropdown and post its match card publicly')
+async def games_command(interaction:discord.Interaction):
+    games=list_saved_games()
+    if not games:
+        return await interaction.response.send_message(
+            "No Capitals games are stored yet. An administrator can use /matchrefresh to import games.",
+            ephemeral=True)
+    view=GamePickerView(games,interaction.user.id)
+    await interaction.response.send_message(view.page_caption(),view=view,ephemeral=True)
+
 @bot.tree.command(name='matchreport',description='Show a previously imported game report')
 @app_commands.describe(game_id='Game identifier from the match feed')
 async def matchreport(interaction:discord.Interaction,game_id:str):
