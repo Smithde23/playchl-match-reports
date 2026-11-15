@@ -30,7 +30,9 @@ PLAYCHL_PUBLIC=os.getenv('PLAYCHL_PUBLIC','1')=='1'
 PLAYCHL_LOOKBACK=max(1,min(100,int(os.getenv('PLAYCHL_LOOKBACK','10'))))
 TARGET_TEAM_NAME=os.getenv('TARGET_TEAM_NAME','Washington Capitals').strip() or 'Washington Capitals'
 DB_PATH=Path(os.getenv('DATABASE_PATH','/data/matchreports.sqlite3'))
-POLL_MINUTES=max(2,int(os.getenv('POLL_MINUTES','5')))
+POLL_MINUTES=max(2,int(os.getenv('POLL_MINUTES','15')))
+# Auto-post only genuinely new games; historical games remain selectable in /games.
+AUTO_POST_SINCE=os.getenv('AUTO_POST_SINCE','2026-11-15').strip()
 MAX_FEED_GAMES=500
 
 def is_target_game(game):
@@ -257,12 +259,29 @@ async def fetch_feed():
     games.sort(key=game_date_key)
     return games
 
+def auto_post_cutoff():
+    try:
+        return datetime.strptime(AUTO_POST_SINCE,'%Y-%m-%d').replace(tzinfo=timezone.utc)
+    except ValueError:
+        log.error("Invalid AUTO_POST_SINCE %r: expected YYYY-MM-DD; disabling automatic historical posting",AUTO_POST_SINCE)
+        return datetime.max.replace(tzinfo=timezone.utc)
+
+async def fetch_recent_games():
+    """Scheduled polling always uses the recent PlayCHL schedule, not manual backfill IDs."""
+    if not FEED_URL:
+        games=await fetch_playchl_games(limit=PLAYCHL_LOOKBACK,team_name=TARGET_TEAM_NAME) if PLAYCHL_PUBLIC else []
+        games=[game for game in games if is_target_game(game)]
+    else:
+        games=await fetch_feed()
+    games.sort(key=lambda g:(game_date_key(g),str(g.get('id'))))
+    return games
+
 @tasks.loop(minutes=POLL_MINUTES)
 async def poll_games():
     if not FEED_URL and not PLAYCHL_PUBLIC:return
     try:
-        games=await fetch_feed()
-        log.info('Automatic poll found %d complete %s games',len(games),TARGET_TEAM_NAME)
+        games=await fetch_recent_games()
+        log.info('Automatic schedule poll found %d complete %s games',len(games),TARGET_TEAM_NAME)
         # First successful discovery creates a baseline; never dump old games into Discord.
         if PLAYCHL_PUBLIC and not FEED_URL and games:
             with db() as conn:
@@ -274,11 +293,22 @@ async def poll_games():
                     conn.execute("INSERT INTO reports(id,payload,posted_at) VALUES (?,?,?)",('__playchl_baseline__','{}','baseline'))
                     log.info('Recorded %d historical PlayCHL games without posting',len(games))
                     return
+        cutoff=auto_post_cutoff()
         for g in games:
             try:
-                if g.get('status','').lower().startswith('final'):
-                    await publish(g)
-            except Exception:log.exception('Unable to publish game %s',g.get('id'))
+                if not str(g.get('status','')).lower().startswith('final'):
+                    continue
+                # Keep historical games searchable without flooding the channel.
+                if game_date_key(g)<cutoff:
+                    if not load(g['id'])[0]:store(g)
+                    continue
+                if not g.get('date'):
+                    log.warning('Auto-post skipped undated game %s (available to select if saved)',g.get('id'))
+                    store(g)
+                    continue
+                await publish(g)
+            except Exception:
+                log.exception('Unable to auto-publish game %s',g.get('id'))
     except Exception:log.exception('Game feed fetch failed')
 
 @poll_games.before_loop
