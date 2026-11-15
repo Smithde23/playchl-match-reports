@@ -237,12 +237,23 @@ def _date_key(value):
     return datetime.min.replace(tzinfo=timezone.utc)
 
 async def fetch_playchl_games(limit=10,include_id=None,team_name=None):
-    """Return the newest complete games, sorted by the actual game date."""
+    """Fetch final games. limit=None scans every accessible matching schedule card."""
+
     results=[]
     async with async_playwright() as p:
         browser=await p.chromium.launch(headless=True,args=["--no-sandbox"])
         try:
-            schedule=await get_page(browser,f"{BASE}/schedule",wait_for_games=True)
+            # A direct game ID does not require loading the entire schedule.
+            schedule={"links":[]}
+            if not include_id:
+                for schedule_attempt in range(2):
+                    schedule=await get_page(browser,f"{BASE}/schedule",wait_for_games=True)
+                    if schedule.get("links"):
+                        break
+                    LOG.warning("PlayCHL schedule contained no game links; retry %s/2",schedule_attempt+1)
+                    await asyncio.sleep(3)
+                if not schedule.get("links"):
+                    raise RuntimeError("PlayCHL schedule returned no game links; cannot confirm full history")
             entries=[]
             seen=set()
             for link in schedule["links"]:
@@ -267,7 +278,7 @@ async def fetch_playchl_games(limit=10,include_id=None,team_name=None):
                     candidates=entries
                 candidates.sort(key=lambda entry:entry["date"],reverse=True)
                 # Check a larger candidate window, then select the newest complete final games.
-                candidate_limit=max(limit*10,100)
+                candidate_limit=max(limit*10,100) if limit else len(candidates)
                 candidates=candidates[:candidate_limit]
             LOG.info("PlayCHL schedule discovered %s unique game links; %s team cards matched; checking %s candidates for newest %s complete games",
                      len(entries),sum(1 for entry in entries if entry["is_team"]),len(candidates),limit)
