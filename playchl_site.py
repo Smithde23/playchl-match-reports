@@ -115,7 +115,7 @@ def parse_snapshot(snap, game_id):
     game["official_stars"]=stars
     # A complete player box score is mandatory before auto-publication.
     if len(game["players"])<8 or len(stars)!=3:
-        LOG.warning("Incomplete game %s: players=%s stars=%s",game_id,len(game["players"]),len(stars))
+        LOG.warning("Incomplete game %s: players=%s stars=%s table_headings=%r table_rows=%r",game_id,len(game["players"]),len(stars),[t["heading"] for t in snap["tables"]],[len(t["rows"]) for t in snap["tables"]])
         return None
     # Match Stats is often a non-table two-column section.
     sm = re.search(r"Match Stats\n(.*?)(?:EA Sports API Results|(?:[A-Za-z ]+ Skaters))",text,re.I|re.S)
@@ -130,23 +130,40 @@ def parse_snapshot(snap, game_id):
 
 EXTRACT_JS = r"""() => {
 const text=document.body.innerText;
-const tables=[...document.querySelectorAll('table')].map(t=>{
- let prev=t, heading='';
- for(let i=0;i<7&&prev;i++){
-   prev=prev.previousElementSibling||prev.parentElement?.previousElementSibling;
-   if(prev){const val=(prev.innerText||'').trim();if(/(skaters|goalies)/i.test(val)&&val.length<180){heading=val;break}}
- }
- if(!heading){
-   let node=t.parentElement;
-   for(let i=0;i<5&&node;i++,node=node.parentElement){
-     const s=(node.innerText||'').slice(0,200);
-     const m=s.match(/([^\n]+(?:Skaters|Goalies))/i);
-     if(m){heading=m[1];break}
-   }
- }
- const rows=[...t.querySelectorAll('tbody tr')].map(tr=>[...tr.querySelectorAll('td')].map(td=>td.innerText.trim()));
- return {heading,rows};
-});
+const getCells = row => {
+  let cells=[...row.querySelectorAll(':scope > td,:scope > th,:scope > [role="cell"],:scope > [role="gridcell"],:scope > div')];
+  if(cells.length<6) cells=[...row.children];
+  return cells.map(c=>(c.innerText||c.textContent||'').trim()).filter(Boolean);
+};
+const rowEls=[...document.querySelectorAll('tr,[role="row"],[class*="player-row"],[class*="playerRow"],[class*="grid-row"],[class*="stat-row"]')];
+const tables=[];
+for(const table of document.querySelectorAll('table,[role="table"],[role="grid"]')){
+  let heading='';
+  let node=table;
+  for(let i=0;i<7&&node;i++,node=node.parentElement){
+    const prev=node.previousElementSibling;
+    const val=(prev?.innerText||'').trim();
+    if(/(skaters|goalies)/i.test(val)&&val.length<180){heading=val;break}
+    const m=(node.innerText||'').slice(0,300).match(/([^\n]+(?:Skaters|Goalies))/i);
+    if(m){heading=m[1];break}
+  }
+  const rows=[...table.querySelectorAll('tr,[role="row"]')].map(getCells).filter(r=>r.length>=6);
+  tables.push({heading,rows});
+}
+for(const row of rowEls){
+  const cells=getCells(row);
+  if(cells.length<10)continue;
+  let heading='';
+  let node=row;
+  for(let i=0;i<8&&node;i++,node=node.parentElement){
+    const s=(node.innerText||'').slice(0,700);
+    const m=s.match(/([^\n]{2,70}(?:Skaters|Goalies))/i);
+    if(m){heading=m[1];break}
+  }
+  if(!tables.some(t=>t.rows.some(r=>r.join('|')===cells.join('|')))){
+    tables.push({heading,rows:[cells]});
+  }
+}
 const links=[...document.querySelectorAll('a[href*="/games/"]')].map(a=>({href:a.getAttribute('href'),text:(a.innerText||'').trim()}));
 return {text,tables,links};
 }"""
@@ -155,7 +172,8 @@ async def get_page(browser,url):
     page=await browser.new_page(viewport={"width":1440,"height":1000})
     try:
         await page.goto(url,wait_until="domcontentloaded",timeout=35000)
-        await page.wait_for_timeout(1500)
+        try: await page.wait_for_function("document.body && /\\bFINAL\\b/i.test(document.body.innerText)",timeout=12000)
+        except Exception: await page.wait_for_timeout(2500)
         return await page.evaluate(EXTRACT_JS)
     finally:await page.close()
 
