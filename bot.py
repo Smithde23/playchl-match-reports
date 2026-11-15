@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands,tasks
 from report import validate,three_stars,stat_line,render_card,summary
+from playchl_site import fetch_playchl_games
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger('playchl.matchreports')
@@ -23,6 +24,8 @@ GUILD_ID=int(os.getenv('GUILD_ID','0'))
 CHANNEL_ID=int(os.getenv('REPORT_CHANNEL_ID','0'))
 FEED_URL=os.getenv('GAME_FEED_URL','').strip()
 FEED_TOKEN=os.getenv('GAME_FEED_TOKEN','').strip()
+PLAYCHL_PUBLIC=os.getenv('PLAYCHL_PUBLIC','1')=='1'
+PLAYCHL_LOOKBACK=max(1,min(50,int(os.getenv('PLAYCHL_LOOKBACK','12'))))
 DB_PATH=Path(os.getenv('DATABASE_PATH','/data/matchreports.sqlite3'))
 POLL_MINUTES=max(2,int(os.getenv('POLL_MINUTES','5')))
 MAX_FEED_GAMES=500
@@ -77,7 +80,8 @@ async def publish(game,force=False):
         return True
 
 async def fetch_feed():
-    if not FEED_URL:return []
+    if not FEED_URL:
+        return await fetch_playchl_games(limit=PLAYCHL_LOOKBACK) if PLAYCHL_PUBLIC else []
     if urlparse(FEED_URL).scheme != 'https':raise ValueError('Feed URL must use HTTPS')
     headers={'Authorization':f'Bearer {FEED_TOKEN}'} if FEED_TOKEN else {}
     timeout=aiohttp.ClientTimeout(total=25)
@@ -90,7 +94,7 @@ async def fetch_feed():
 
 @tasks.loop(minutes=POLL_MINUTES)
 async def poll_games():
-    if not FEED_URL:return
+    if not FEED_URL and not PLAYCHL_PUBLIC:return
     try:
         for g in await fetch_feed():
             try:
@@ -137,6 +141,23 @@ async def matchimport(interaction:discord.Interaction,file:discord.Attachment,pu
         await interaction.followup.send(f"Imported game **{game['id']}**. "+('Posted to match-report channel.' if published else 'Saved (or already posted).'),ephemeral=True)
     except Exception as e:await interaction.followup.send(f'Import failed: {e}',ephemeral=True)
 
+@bot.tree.command(name='matchfetch',description='Admin: retrieve one public PlayCHL game and publish its complete report')
+@app_commands.checks.has_permissions(manage_guild=True)
+async def matchfetch(interaction:discord.Interaction,game_id:str,publish_now:bool=True):
+    await interaction.response.defer(ephemeral=True)
+    import re
+    if not re.fullmatch(r'[0-9a-fA-F]{24}',game_id):
+        return await interaction.followup.send('Use the 24-character PlayCHL game ID from the game URL.',ephemeral=True)
+    try:
+        games=await fetch_playchl_games(include_id=game_id)
+        if not games:return await interaction.followup.send('No complete final box score was extracted. Check Railway logs; nothing was posted.',ephemeral=True)
+        game=games[0];store(game)
+        posted=await publish(game) if publish_now else False
+        await interaction.followup.send(('Posted.' if posted else 'Saved; already published or publish_now disabled.')+f' {summary(game)}',ephemeral=True)
+    except Exception:
+        log.exception('PlayCHL manual fetch failed')
+        await interaction.followup.send('Page fetch failed; see Railway logs.',ephemeral=True)
+
 @bot.tree.command(name='matchstats',description='Download the full available skater and goalie box stats for a game')
 async def matchstats(interaction:discord.Interaction,game_id:str):
     game,_=load(game_id)
@@ -166,7 +187,7 @@ async def matchrepost(interaction:discord.Interaction,game_id:str):
 @app_commands.checks.has_permissions(manage_guild=True)
 async def matchrefresh(interaction:discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    if not FEED_URL:return await interaction.followup.send('No GAME_FEED_URL configured. Use /matchimport.',ephemeral=True)
+    if not FEED_URL and not PLAYCHL_PUBLIC:return await interaction.followup.send('No public PlayCHL reader or GAME_FEED_URL enabled. Use /matchimport.',ephemeral=True)
     count=0;errors=0
     try:
         games=await fetch_feed()
