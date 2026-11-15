@@ -160,21 +160,61 @@ intents=discord.Intents.default()
 bot=commands.Bot(command_prefix='!',intents=intents)
 post_lock=asyncio.Lock()
 
+def report_quality(game):
+    """Higher score means a richer extraction for the same completed game."""
+    players=len(game.get('players') or [])
+    stars=len(three_stars(game))
+    team_stats=sum(len(v or {}) for v in (game.get('team_stats') or {}).values())
+    return players*10+stars*100+team_stats
+
 async def publish(game,force=False):
     validate(game)
     if not is_target_game(game):
         raise ValueError(f'This bot only publishes {TARGET_TEAM_NAME} games.')
-    store(game)
     if not CHANNEL_ID:raise RuntimeError('REPORT_CHANNEL_ID is not set')
     async with post_lock:
-        _,posted=load(game['id'])
-        if posted and not force:return False
+        with db() as conn:
+            row=conn.execute(
+                'SELECT payload,posted_at,message_id,channel_id FROM reports WHERE id=?',
+                (str(game['id']),)
+            ).fetchone()
+        old_game=json.loads(row[0]) if row else None
+        posted=row[1] if row else None
+        message_id=row[2] if row else None
+        saved_channel_id=row[3] if row else None
+        old_quality=report_quality(old_game) if old_game else -1
+        new_quality=report_quality(game)
+        store(game)
+
+        # Existing reports are edited in place when a later scrape finds richer stats.
+        # Historical baseline entries are saved only; they must never be posted retroactively.
+        if posted and not force:
+            if posted=='baseline' or not message_id:
+                return False
+            if new_quality<=old_quality:
+                return False
+            try:
+                ch=bot.get_channel(int(saved_channel_id or CHANNEL_ID)) or await bot.fetch_channel(int(saved_channel_id or CHANNEL_ID))
+                msg=await ch.fetch_message(int(message_id))
+                safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
+                graphic=discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")
+                await msg.edit(embed=report_embed(game),attachments=[graphic])
+                log.info("Enriched existing match report %s: quality %s -> %s",game['id'],old_quality,new_quality)
+            except Exception:
+                log.exception("Could not update existing Discord report for enriched game %s",game['id'])
+            return False
+
         ch=bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
         safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
         files=[discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")]
         msg=await ch.send(embed=report_embed(game),files=files)
-        with db() as c:
-            c.execute('UPDATE reports SET posted_at=?,message_id=?,channel_id=? WHERE id=?',(datetime.now(timezone.utc).isoformat(),str(msg.id),str(ch.id),str(game['id'])))
+        with db() as conn:
+            conn.execute(
+                'UPDATE reports SET posted_at=?,message_id=?,channel_id=? WHERE id=?',
+                (datetime.now(timezone.utc).isoformat(),str(msg.id),str(ch.id),str(game['id']))
+            )
+        if not game.get('boxscore_complete'):
+            log.warning("Published scorecard %s with partial stats; later polls will retry and enrich it",game['id'])
         return True
 
 async def fetch_feed():
