@@ -237,8 +237,10 @@ async def fetch_playchl_games(limit=10,include_id=None,team_name=None):
                 seen.add(gid)
                 context=(link.get("context","")+" "+link.get("text","")).strip()
                 is_team=bool(team_name and re.search(r"Washington|Capitals|\bWSH\b",context,re.I))
+                date_match=re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4},\s+\d{1,2}:\d{2}\s*[AP]M\b",context,re.I)
+                date_text=date_match.group(0) if date_match else ""
                 entries.append({"id":gid,"context":context,"is_team":is_team,
-                                "date":_date_key(context)})
+                                "date_text":date_text,"date":_date_key(context)})
             if include_id:
                 candidates=[{"id":include_id,"context":"","date":datetime.min.replace(tzinfo=timezone.utc)}]
             else:
@@ -260,6 +262,8 @@ async def fetch_playchl_games(limit=10,include_id=None,team_name=None):
                     try:
                         snap=await get_page(browser,f"{BASE}/games/{gid}")
                         game=parse_snapshot(snap,gid)
+                        if game and not game.get("date") and entry.get("date_text"):
+                            game["date"]=entry["date_text"]
                         if game and team_name:
                             names=[str(game.get(side,{}).get("name","")).casefold() for side in ("home","away")]
                             is_target=any(("washington" in name or "capitals" in name or name.strip()=="wsh") for name in names)
