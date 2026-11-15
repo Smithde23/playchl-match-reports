@@ -249,9 +249,6 @@ async def latestreport(interaction:discord.Interaction):
         )
     safe_id=re.sub(r'[^A-Za-z0-9_-]','_',str(game['id']))[:70]
     files=[discord.File(io.BytesIO(render_card(game)),filename=f"match_{safe_id}.png")]
-    zip_bytes=build_boxscore_zip(game)
-    if zip_bytes:
-        files.append(discord.File(io.BytesIO(zip_bytes),filename=f"boxstats_{safe_id}.zip"))
     await interaction.followup.send(
         content="**Most recently saved Washington Capitals match report**",
         embed=report_embed(game),files=files,ephemeral=True
