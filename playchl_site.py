@@ -76,6 +76,8 @@ def parse_snapshot(snap, game_id):
             "home":{"name":home_name,"score":int(home_score)},
             "source_url": f"{BASE}/games/{game_id}",
             "players":[],"team_stats":{"home":{},"away":{}}}
+    date_match=re.search(r"\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{1,2},\\s+\\d{4},\\s+\\d{1,2}:\\d{2}\\s*[AP]M\\b",text,re.I)
+    if date_match:game["date"]=date_match.group(0)
     # Consume table rows captured from the rendered DOM. A label immediately
     # above each table identifies the team and the skater/goalie section.
     for table in snap["tables"]:
@@ -117,15 +119,16 @@ def parse_snapshot(snap, game_id):
     if len(game["players"])<8 or len(stars)!=3:
         LOG.warning("Incomplete game %s: players=%s stars=%s table_headings=%r table_rows=%r",game_id,len(game["players"]),len(stars),[t["heading"] for t in snap["tables"]],[len(t["rows"]) for t in snap["tables"]])
         return None
-    # Match Stats is often a non-table two-column section.
-    sm = re.search(r"Match Stats\n(.*?)(?:EA Sports API Results|(?:[A-Za-z ]+ Skaters))",text,re.I|re.S)
-    if sm:
-        lines=[x.strip() for x in sm.group(1).splitlines() if x.strip()]
-        for i,line in enumerate(lines):
-            key=STAT_KEYS.get(line)
-            if key and i>0 and i+1<len(lines):
-                game["team_stats"]["away"][key]=lines[i-1]
-                game["team_stats"]["home"][key]=lines[i+1]
+    # Team stats are rendered as value / label / value, sometimes with line breaks.
+    stat_labels={"Goals":"goals","Shots":"shots","Hits":"hits","TOA":"time_on_attack",
+                 "Faceoffs%":"faceoff_pct","PIM":"penalty_minutes","Blocks":"blocks",
+                 "Takeaways":"takeaways","Giveaways":"giveaways","Interceptions":"interceptions"}
+    value_pattern=r"([+-]?\d+(?::\d{2})?%?)"
+    for label,key in stat_labels.items():
+        match=re.search(value_pattern+r"\s*"+re.escape(label)+r"\s*"+value_pattern,text,re.I)
+        if match:
+            game["team_stats"]["away"][key]=match.group(1)
+            game["team_stats"]["home"][key]=match.group(2)
     return game
 
 EXTRACT_JS = r"""() => {
